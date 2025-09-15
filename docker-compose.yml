@@ -1,0 +1,11 @@
+version: "3.9"
+services:
+  sitsmart:
+    build: .
+    image: sitsmart:latest
+    container_name: sitsmart
+    ports:
+      - "8000:8000"
+    environment:
+      - PYTHONUNBUFFERED=1
+    restart: unless-stopped
