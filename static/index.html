@@ -1,0 +1,144 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>SitSmart Demo (Client‑side MediaPipe)</title>
+    <style>
+      body { font-family: system-ui, -apple-system, Segoe UI, Roboto, sans-serif; margin: 24px; }
+      #wrap { display: grid; grid-template-columns: 360px 1fr; gap: 24px; align-items: start; }
+      #stage { position: relative; width: 640px; max-width: 100%; }
+      video { width: 100%; height: auto; background: #111; border-radius: 8px; display: block; transform: scaleX(-1); }
+      canvas { width: 100%; height: auto; background: transparent; border-radius: 8px; display: block; }
+      #overlay { position: absolute; inset: 0; pointer-events: none; background: transparent; transform: scaleX(-1); transform-origin: center; }
+      .panel { padding: 16px; border: 1px solid #ddd; border-radius: 8px; }
+      .controls { display: flex; gap: 8px; align-items: center; margin-top: 12px; }
+      button { padding: 8px 12px; border-radius: 6px; border: 1px solid #ddd; background: #f8fafc; cursor: pointer; }
+      button:disabled { opacity: 0.5; cursor: not-allowed; }
+      .status { font-weight: 600; }
+      .good { color: #15803d; }
+      .bad { color: #b91c1c; }
+      .unknown { color: #6b7280; }
+    </style>
+  </head>
+  <body>
+    <h1>SitSmart Real-time Posture Demo (Client-side)</h1>
+    <div id="wrap">
+      <div class="panel">
+        <div id="stage">
+          <video id="video" autoplay playsinline muted></video>
+          <canvas id="overlay"></canvas>
+        </div>
+        <div class="controls">
+          <button id="startBtn">Start</button>
+          <button id="stopBtn" disabled>Stop</button>
+          <label>FPS <input id="fps" type="number" min="1" max="30" value="15" style="width:60px"></label>
+          <span>State: <span id="state" class="status unknown">idle</span></span>
+        </div>
+      </div>
+      <div class="panel">
+        <div>Frames: <span id="frames">0</span></div>
+        <div>Model: <span id="model">loading…</span></div>
+      </div>
+    </div>
+
+    <script type="module">
+      import { PoseLandmarker, FilesetResolver, DrawingUtils } from 'https://cdn.jsdelivr.net/npm/@mediapipe/tasks-vision@latest';
+
+      const video = document.getElementById('video');
+      const overlay = document.getElementById('overlay');
+      const startBtn = document.getElementById('startBtn');
+      const stopBtn = document.getElementById('stopBtn');
+      const stateEl = document.getElementById('state');
+      const framesEl = document.getElementById('frames');
+      const fpsInput = document.getElementById('fps');
+      const modelEl = document.getElementById('model');
+
+      let landmarker = null;
+      let stream = null;
+      let rafId = null;
+      let frames = 0;
+
+      function setState(s){ stateEl.textContent = s; stateEl.className = 'status ' + (s || 'unknown'); }
+
+      async function loadModel(){
+        const filesetResolver = await FilesetResolver.forVisionTasks(
+          'https://cdn.jsdelivr.net/npm/@mediapipe/tasks-vision@latest/wasm'
+        );
+        landmarker = await PoseLandmarker.createFromOptions(filesetResolver, {
+          baseOptions: {
+            modelAssetPath: 'https://storage.googleapis.com/mediapipe-models/pose_landmarker/pose_landmarker_lite/float16/1/pose_landmarker_lite.task'
+          },
+          runningMode: 'VIDEO',
+          numPoses: 1,
+          minPoseDetectionConfidence: 0.5,
+          minPosePresenceConfidence: 0.5,
+          minTrackingConfidence: 0.5
+        });
+        modelEl.textContent = 'Pose Landmarker Lite';
+      }
+
+      function sizeCanvases(){
+        const w = video.videoWidth || 640;
+        const h = video.videoHeight || 480;
+        overlay.width = w; overlay.height = h;
+        overlay.style.width = '100%';
+      }
+
+      async function start(){
+        try {
+          setState('requesting-camera');
+          stream = await navigator.mediaDevices.getUserMedia({ video: { width: 640, height: 480 }, audio: false });
+          video.srcObject = stream;
+          await video.play();
+          await loadModel();
+          sizeCanvases();
+          startBtn.disabled = true; stopBtn.disabled = false; setState('running');
+          loop();
+        } catch (e) {
+          setState('error');
+          alert('Camera/model error: ' + e);
+        }
+      }
+
+      function stop(){
+        if (rafId) cancelAnimationFrame(rafId); rafId = null;
+        if (stream){ stream.getTracks().forEach(t => t.stop()); stream = null; }
+        startBtn.disabled = false; stopBtn.disabled = true; setState('stopped');
+        const ctx = overlay.getContext('2d'); ctx && ctx.clearRect(0,0,overlay.width, overlay.height);
+      }
+
+      function loop(){
+        const ctx = overlay.getContext('2d');
+        const draw = new DrawingUtils(ctx);
+        const fps = Math.max(1, Math.min(30, parseInt(fpsInput.value || '15', 10)));
+        const interval = 1000 / fps;
+        let last = 0;
+
+        const step = (ts) => {
+          if (!landmarker || !video.srcObject) return;
+          if (ts - last >= interval){
+            last = ts;
+            const now = performance.now();
+            const result = landmarker.detectForVideo(video, now);
+            ctx.clearRect(0,0,overlay.width, overlay.height);
+            if (result && result.landmarks && result.landmarks[0]){
+              const lms = result.landmarks[0];
+              draw.drawLandmarks(lms, { color: '#10b981', lineWidth: 2, radius: 2.5 });
+              draw.drawConnectors(lms, PoseLandmarker.POSE_CONNECTIONS, { color: '#3b82f6', lineWidth: 2 });
+            }
+            frames += 1; framesEl.textContent = String(frames);
+          }
+          rafId = requestAnimationFrame(step);
+        };
+        rafId = requestAnimationFrame(step);
+      }
+
+      startBtn.addEventListener('click', start);
+      stopBtn.addEventListener('click', stop);
+
+      // Resize overlay when metadata is loaded
+      video.addEventListener('loadedmetadata', sizeCanvases);
+    </script>
+  </body>
+</html>
