@@ -1,0 +1,1 @@
+"""SitSmart application package."""
