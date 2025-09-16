@@ -7,5 +7,11 @@ services:
     ports:
       - "8000:8000"
     environment:
+      - HALPE_UNSAFE_LOAD=1
       - PYTHONUNBUFFERED=1
+      - HALPE_CFG=/models/rtmpose-s_8xb1024-700e_body8-halpe26-256x192.py
+      - HALPE_PTH=/models/rtmpose-s_simcc-body7_pt-body7-halpe26_700e-256x192-7f134165_20230605.pth
+      - HALPE_DEVICE=cpu
+    volumes:
+      - ./models:/models:ro
     restart: unless-stopped

@@ -3,7 +3,7 @@
   <head>
     <meta charset="utf-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1" />
-    <title>SitSmart Demo (Client‑side MediaPipe)</title>
+    <title>SitSmart Demo (Halpe‑26 via Backend)</title>
     <style>
       body { font-family: system-ui, -apple-system, Segoe UI, Roboto, sans-serif; margin: 24px; }
       #wrap { display: grid; grid-template-columns: 360px 1fr; gap: 24px; align-items: start; }
@@ -19,10 +19,11 @@
       .good { color: #15803d; }
       .bad { color: #b91c1c; }
       .unknown { color: #6b7280; }
+      .error { color: #b91c1c; }
     </style>
   </head>
   <body>
-    <h1>SitSmart Real-time Posture Demo (Client-side)</h1>
+    <h1>SitSmart Real-time Posture Demo (Halpe‑26)</h1>
     <div id="wrap">
       <div class="panel">
         <div id="stage">
@@ -32,112 +33,122 @@
         <div class="controls">
           <button id="startBtn">Start</button>
           <button id="stopBtn" disabled>Stop</button>
-          <label>FPS <input id="fps" type="number" min="1" max="30" value="15" style="width:60px"></label>
+          <label>FPS <input id="fps" type="number" min="1" max="15" value="5" style="width:60px"></label>
           <span>State: <span id="state" class="status unknown">idle</span></span>
         </div>
       </div>
       <div class="panel">
         <div>Frames: <span id="frames">0</span></div>
-        <div>Model: <span id="model">loading…</span></div>
+        <div>Backend: <span id="backend">disconnected</span></div>
+        <div class="status" id="err"></div>
       </div>
     </div>
 
-    <script type="module">
-      import { PoseLandmarker, FilesetResolver, DrawingUtils } from 'https://cdn.jsdelivr.net/npm/@mediapipe/tasks-vision@latest';
-
+    <script>
       const video = document.getElementById('video');
       const overlay = document.getElementById('overlay');
+      const octx = overlay.getContext('2d');
       const startBtn = document.getElementById('startBtn');
       const stopBtn = document.getElementById('stopBtn');
       const stateEl = document.getElementById('state');
       const framesEl = document.getElementById('frames');
+      const backendEl = document.getElementById('backend');
+      const errEl = document.getElementById('err');
       const fpsInput = document.getElementById('fps');
-      const modelEl = document.getElementById('model');
 
-      let landmarker = null;
+      let ws = null;
       let stream = null;
-      let rafId = null;
+      let loopId = null;
       let frames = 0;
 
       function setState(s){ stateEl.textContent = s; stateEl.className = 'status ' + (s || 'unknown'); }
-
-      async function loadModel(){
-        const filesetResolver = await FilesetResolver.forVisionTasks(
-          'https://cdn.jsdelivr.net/npm/@mediapipe/tasks-vision@latest/wasm'
-        );
-        landmarker = await PoseLandmarker.createFromOptions(filesetResolver, {
-          baseOptions: {
-            modelAssetPath: 'https://storage.googleapis.com/mediapipe-models/pose_landmarker/pose_landmarker_lite/float16/1/pose_landmarker_lite.task'
-          },
-          runningMode: 'VIDEO',
-          numPoses: 1,
-          minPoseDetectionConfidence: 0.5,
-          minPosePresenceConfidence: 0.5,
-          minTrackingConfidence: 0.5
-        });
-        modelEl.textContent = 'Pose Landmarker Lite';
-      }
+      function setBackend(s){ backendEl.textContent = s; }
+      function setErr(msg){ errEl.textContent = msg || ''; errEl.className = msg ? 'status error' : 'status'; }
 
       function sizeCanvases(){
-        const w = video.videoWidth || 640;
-        const h = video.videoHeight || 480;
-        overlay.width = w; overlay.height = h;
-        overlay.style.width = '100%';
+        const w = video.videoWidth || 640; const h = video.videoHeight || 480;
+        overlay.width = w; overlay.height = h; overlay.style.width = '100%';
       }
 
       async function start(){
         try {
-          setState('requesting-camera');
+          if (!navigator.mediaDevices?.getUserMedia) {
+            alert('Camera requires HTTPS or localhost. Open http://localhost:8000'); return;
+          }
+          setState('camera');
           stream = await navigator.mediaDevices.getUserMedia({ video: { width: 640, height: 480 }, audio: false });
-          video.srcObject = stream;
-          await video.play();
-          await loadModel();
-          sizeCanvases();
-          startBtn.disabled = true; stopBtn.disabled = false; setState('running');
-          loop();
+          video.srcObject = stream; await video.play(); sizeCanvases();
+          const proto = location.protocol === 'https:' ? 'wss' : 'ws';
+          ws = new WebSocket(`${proto}://${location.host}/api/ws/analyze`);
+          ws.binaryType = 'arraybuffer';
+          ws.onopen = () => { setBackend('connected'); setState('running'); startBtn.disabled = true; stopBtn.disabled = false; runLoop(); };
+          ws.onclose = () => { setBackend('disconnected'); setState('stopped'); stopLoop(); startBtn.disabled = false; stopBtn.disabled = true; };
+          ws.onerror = () => { setErr('ws error'); };
+          ws.onmessage = (evt) => {
+            try {
+              const data = JSON.parse(evt.data);
+              if (data.status) return;
+              if (data.error) { setErr(data.error); return; }
+              drawKpts(data.kpts);
+            } catch {}
+          };
         } catch (e) {
-          setState('error');
-          alert('Camera/model error: ' + e);
+          setState('error'); alert('Camera error: ' + e);
         }
       }
 
       function stop(){
-        if (rafId) cancelAnimationFrame(rafId); rafId = null;
-        if (stream){ stream.getTracks().forEach(t => t.stop()); stream = null; }
-        startBtn.disabled = false; stopBtn.disabled = true; setState('stopped');
-        const ctx = overlay.getContext('2d'); ctx && ctx.clearRect(0,0,overlay.width, overlay.height);
+        if (ws) { try { ws.close(); } catch {} ws = null; }
+        if (stream) { stream.getTracks().forEach(t=>t.stop()); stream = null; }
+        stopLoop(); octx.clearRect(0,0,overlay.width, overlay.height);
       }
 
-      function loop(){
-        const ctx = overlay.getContext('2d');
-        const draw = new DrawingUtils(ctx);
-        const fps = Math.max(1, Math.min(30, parseInt(fpsInput.value || '15', 10)));
-        const interval = 1000 / fps;
-        let last = 0;
-
-        const step = (ts) => {
-          if (!landmarker || !video.srcObject) return;
+      function runLoop(){
+        const fps = Math.max(1, Math.min(15, parseInt(fpsInput.value||'5',10)));
+        const interval = 1000 / fps; let last = 0;
+        function tick(ts){
+          if (!ws || ws.readyState !== WebSocket.OPEN) return;
           if (ts - last >= interval){
             last = ts;
-            const now = performance.now();
-            const result = landmarker.detectForVideo(video, now);
-            ctx.clearRect(0,0,overlay.width, overlay.height);
-            if (result && result.landmarks && result.landmarks[0]){
-              const lms = result.landmarks[0];
-              draw.drawLandmarks(lms, { color: '#10b981', lineWidth: 2, radius: 2.5 });
-              draw.drawConnectors(lms, PoseLandmarker.POSE_CONNECTIONS, { color: '#3b82f6', lineWidth: 2 });
-            }
+            const canvas = document.createElement('canvas');
+            canvas.width = overlay.width; canvas.height = overlay.height;
+            const ctx = canvas.getContext('2d');
+            ctx.drawImage(video, 0, 0, canvas.width, canvas.height);
+            canvas.toBlob(b => { if (!b) return; b.arrayBuffer().then(buf => ws.send(buf)); }, 'image/jpeg', 0.6);
             frames += 1; framesEl.textContent = String(frames);
           }
-          rafId = requestAnimationFrame(step);
-        };
-        rafId = requestAnimationFrame(step);
+          loopId = requestAnimationFrame(tick);
+        }
+        loopId = requestAnimationFrame(tick);
+      }
+      function stopLoop(){ if (loopId) cancelAnimationFrame(loopId); loopId = null; }
+
+      function drawKpts(kpts){
+        if (!kpts || !kpts.length) return;
+        const w = overlay.width, h = overlay.height;
+        octx.clearRect(0,0,w,h);
+        // Halpe-26 approximate indices (commonly: 0-nose, 1-neck, 2-RShoulder, 3-RElbow, 4-RWrist, 5-LShoulder, 6-LElbow, 7-LWrist, 8-RHip, 9-RKnee, 10-RAnkle, 11-LHip, 12-LKnee, 13-LAnkle, 14-REye, 15-LEye, 16-REar, 17-LEar, 18-Chest, 19-Background?, plus 20-25 feet; varies by conversion). This can be tuned per model.
+        const edges = [
+          [2,3],[3,4], [5,6],[6,7],         // arms
+          [2,5], [1,2],[1,5], [1,18],        // shoulders, neck, chest
+          [8,9],[9,10], [11,12],[12,13],     // legs
+          [8,11], [18,8],[18,11]             // pelvis to chest
+        ];
+        // lines
+        octx.strokeStyle = 'rgba(59,130,246,0.95)'; octx.lineWidth = 2;
+        octx.beginPath();
+        for (const [a,b] of edges){
+          const pa = kpts[a], pb = kpts[b]; if (!pa || !pb) continue;
+          octx.moveTo(pa[0]*w, pa[1]*h); octx.lineTo(pb[0]*w, pb[1]*h);
+        }
+        octx.stroke();
+        // points
+        octx.fillStyle = 'rgba(16,185,129,0.95)';
+        for (const p of kpts){ if (!p) continue; octx.beginPath(); octx.arc(p[0]*w, p[1]*h, 2.5, 0, Math.PI*2); octx.fill(); }
       }
 
       startBtn.addEventListener('click', start);
       stopBtn.addEventListener('click', stop);
-
-      // Resize overlay when metadata is loaded
       video.addEventListener('loadedmetadata', sizeCanvases);
     </script>
   </body>
