@@ -100,8 +100,12 @@ class PoseService:
 
         ls = get_point(LEFT_SHOULDER)
         rs = get_point(RIGHT_SHOULDER)
-        le = get_point(LEFT_EAR) or get_point(LEFT_EYE)
-        re = get_point(RIGHT_EAR) or get_point(RIGHT_EYE)
+        le = get_point(LEFT_EAR)
+        if le is None:
+            le = get_point(LEFT_EYE)
+        re = get_point(RIGHT_EAR)
+        if re is None:
+            re = get_point(RIGHT_EYE)
         head = None
         nose = get_point(NOSE)
         if le is not None and re is not None:
