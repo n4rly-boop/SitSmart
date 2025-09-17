@@ -32,13 +32,23 @@
         <div class="controls">
           <button id="startBtn">Start</button>
           <button id="stopBtn" disabled>Stop</button>
-          <label>FPS <input id="fps" type="number" min="1" max="30" value="15" style="width:60px"></label>
+          <label>FPS <input id="fps" type="number" min="1" max="120" value="30" style="width:60px"></label>
           <span>State: <span id="state" class="status unknown">idle</span></span>
         </div>
       </div>
       <div class="panel">
         <div>Frames: <span id="frames">0</span></div>
         <div>Model: <span id="model">loading…</span></div>
+        <hr />
+        <div style="display:flex;justify-content:space-between;align-items:center;gap:8px;">
+          <h3 style="margin:0;">Server Features</h3>
+          <label style="font-weight:normal;font-size:12px;">
+            Send every <input id="featureEvery" type="number" min="1" max="30" value="1" style="width:50px"> frames
+          </label>
+        </div>
+        <div id="features" style="font-family:ui-monospace, SFMono-Regular, Menlo, monospace; font-size: 13px; white-space: pre-wrap; background:#f9fafb; border:1px dashed #e5e7eb; padding:8px; border-radius:6px; min-height:80px;">
+          
+        </div>
       </div>
     </div>
 
@@ -53,11 +63,14 @@
       const framesEl = document.getElementById('frames');
       const fpsInput = document.getElementById('fps');
       const modelEl = document.getElementById('model');
+      const featuresEl = document.getElementById('features');
+      const featureEveryInput = document.getElementById('featureEvery');
 
       let landmarker = null;
       let stream = null;
       let rafId = null;
       let frames = 0;
+      let lastFeaturePayloadMs = 0;
 
       function setState(s){ stateEl.textContent = s; stateEl.className = 'status ' + (s || 'unknown'); }
 
@@ -108,6 +121,49 @@
         const ctx = overlay.getContext('2d'); ctx && ctx.clearRect(0,0,overlay.width, overlay.height);
       }
 
+      function frameToBlob(canvas){
+        return new Promise((resolve, reject) => {
+          canvas.toBlob((blob) => {
+            if (blob) resolve(blob); else reject(new Error('toBlob failed'));
+          }, 'image/jpeg', 0.85);
+        });
+      }
+
+      async function sendFeaturesSnapshot(){
+        try {
+          // Draw current video frame into a temp canvas with the real pixel size
+          const w = video.videoWidth || 640; const h = video.videoHeight || 480;
+          const temp = document.createElement('canvas'); temp.width = w; temp.height = h;
+          const tctx = temp.getContext('2d');
+          // Mirror horizontally to match the displayed video
+          tctx.save(); tctx.scale(-1, 1); tctx.drawImage(video, -w, 0, w, h); tctx.restore();
+          const blob = await frameToBlob(temp);
+          const form = new FormData(); form.append('image', blob, 'frame.jpg');
+          const resp = await fetch('/api/features', { method: 'POST', body: form });
+          let data = null;
+          try { data = await resp.json(); } catch (e) { /* ignore parse errors */ }
+          if (!resp.ok) {
+            const msg = data && data.detail ? data.detail : ('HTTP ' + resp.status);
+            throw new Error(msg);
+          }
+          const fv = data.features;
+          if (!fv){
+            featuresEl.textContent = JSON.stringify(data, null, 2);
+            return;
+          }
+          const pretty = [
+            `shoulder_line_angle_deg: ${fv.shoulder_line_angle_deg.toFixed(2)}`,
+            `head_tilt_deg: ${fv.head_tilt_deg === null ? 'null' : fv.head_tilt_deg.toFixed(2)}`,
+            `head_to_shoulder_distance_px: ${fv.head_to_shoulder_distance_px.toFixed(1)}`,
+            `head_to_shoulder_distance_ratio: ${fv.head_to_shoulder_distance_ratio.toFixed(3)}`,
+            `shoulder_width_px: ${fv.shoulder_width_px.toFixed(1)}`
+          ].join('\n');
+          featuresEl.textContent = pretty;
+        } catch (e) {
+          featuresEl.textContent = String(e);
+        }
+      }
+
       function loop(){
         const ctx = overlay.getContext('2d');
         const draw = new DrawingUtils(ctx);
@@ -128,6 +184,11 @@
               draw.drawConnectors(lms, PoseLandmarker.POSE_CONNECTIONS, { color: '#3b82f6', lineWidth: 2 });
             }
             frames += 1; framesEl.textContent = String(frames);
+            const every = Math.max(1, Math.min(30, parseInt(featureEveryInput.value || '5', 10)));
+            if (frames % every === 0){
+              // fire and forget, do not block render loop
+              sendFeaturesSnapshot();
+            }
           }
           rafId = requestAnimationFrame(step);
         };
