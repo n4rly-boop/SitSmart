@@ -2,8 +2,9 @@ from fastapi import APIRouter, UploadFile, File, HTTPException, WebSocket
 from fastapi.responses import JSONResponse
 from starlette.websockets import WebSocketDisconnect
 
-from app.api.schemas import AnalyzeResponse
+from app.api.schemas import AnalyzeResponse, FeatureExtractionResponse
 from app.services.pose_service import PoseService, PoseServiceUnavailable
+from app.services.feature_extractor import PostureFeatureExtractor
 
 router = APIRouter()
 
@@ -23,6 +24,19 @@ async def analyze(image: UploadFile = File(...)):
         raise HTTPException(status_code=503, detail=str(e))
     except Exception as e:  # noqa: BLE001 - surface error to client for now
         raise HTTPException(status_code=400, detail=f"Failed to analyze image: {e}")
+
+
+@router.post("/features", response_model=FeatureExtractionResponse, tags=["analysis"])
+async def extract_features(image: UploadFile = File(...)):
+    try:
+        image_bytes = await image.read()
+        extractor = PostureFeatureExtractor()
+        result = extractor.extract_features(image_bytes)
+        return FeatureExtractionResponse.model_validate(result)
+    except PoseServiceUnavailable as e:
+        raise HTTPException(status_code=503, detail=str(e))
+    except Exception as e:  # noqa: BLE001 - surface error to client for now
+        raise HTTPException(status_code=400, detail=f"Failed to extract features: {e}")
 
 
 @router.websocket("/ws/analyze")
