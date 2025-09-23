@@ -43,7 +43,6 @@
         <div class="controls">
           <button id="startBtn">Start</button>
           <button id="stopBtn" disabled>Stop</button>
-          <button id="reminderBtn" title="Show posture reminder">Reminder</button>
           <label>FPS <input id="fps" type="number" min="1" max="120" value="30" style="width:60px"></label>
           <span>State: <span id="state" class="status unknown">idle</span></span>
         </div>
@@ -74,7 +73,6 @@
       const overlay = document.getElementById('overlay');
       const startBtn = document.getElementById('startBtn');
       const stopBtn = document.getElementById('stopBtn');
-      const reminderBtn = document.getElementById('reminderBtn');
       const stateEl = document.getElementById('state');
       const framesEl = document.getElementById('frames');
       const fpsInput = document.getElementById('fps');
@@ -157,14 +155,18 @@
           const blob = await frameToBlob(temp);
           const form = new FormData(); form.append('image', blob, 'frame.jpg');
           const resp = await fetch('/api/features', { method: 'POST', body: form });
+          console.log('[front] POST /api/features sent');
           let data = null;
-          try { data = await resp.json(); } catch (e) { /* ignore parse errors */ }
+          try { data = await resp.json(); } catch (e) { console.warn('[front] /api/features JSON parse failed', e); }
           if (!resp.ok) {
             const msg = data && data.detail ? data.detail : ('HTTP ' + resp.status);
+            console.error('[front] /api/features error', msg);
             throw new Error(msg);
           }
+          console.log('[front] /api/features ok');
           const fv = data.features;
           if (!fv){
+            console.warn('[front] /api/features no features in response', data);
             featuresEl.textContent = JSON.stringify(data, null, 2);
             return;
           }
@@ -177,6 +179,7 @@
           ].join('\n');
           featuresEl.textContent = pretty;
         } catch (e) {
+          console.error('[front] sendFeaturesSnapshot failed', e);
           featuresEl.textContent = String(e);
         }
       }
@@ -244,18 +247,41 @@
         setTimeout(() => { if (toast.parentNode) toast.parentNode.removeChild(toast); }, ttl * 1000);
       }
 
-      async function fetchReminder(){
-        try {
-          const resp = await fetch('/api/reminder');
-          const data = await resp.json();
-          if (!resp.ok){ throw new Error(data && data.detail ? data.detail : ('HTTP ' + resp.status)); }
-          showToast(data);
-        } catch (e) {
-          showToast({ title: 'Error', message: String(e), severity: 'critical' });
+      // Webhook-based notifications: subscribe to backend broadcast via WS
+      (function setupNotificationWebSocket(){
+        let ws = null;
+        function connect(){
+          try {
+            const proto = location.protocol === 'https:' ? 'wss' : 'ws';
+            ws = new WebSocket(`${proto}://${location.host}/api/ws/notifications`);
+            console.log('[front] WS connect', ws.url);
+            ws.onmessage = (evt) => {
+              try {
+                const data = JSON.parse(evt.data);
+                if (data && data.status === 'ready'){
+                  console.log('[front] WS ready');
+                  // Fetch last notification in case we missed broadcast during handshake
+                  fetch('/api/notifications/last').then(r => r.json()).then(last => {
+                    if (last && last.title && last.message){
+                      console.log('[front] Fetch last notification', last);
+                      showToast(last);
+                    }
+                  }).catch(() => {});
+                } else if (data && data.title && data.message){
+                  console.log('[front] WS notification', data);
+                  showToast(data);
+                }
+              } catch {}
+            };
+            ws.onopen = () => { console.log('[front] WS open'); };
+            ws.onerror = (e) => { console.error('[front] WS error', e); };
+            ws.onclose = () => { console.warn('[front] WS closed; reconnecting'); setTimeout(connect, 1500); };
+          } catch {
+            // ignore
+          }
         }
-      }
-
-      reminderBtn.addEventListener('click', fetchReminder);
+        connect();
+      })();
 
       // Resize overlay when metadata is loaded
       video.addEventListener('loadedmetadata', sizeCanvases);

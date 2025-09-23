@@ -47,3 +47,10 @@ class Notification(BaseModel):
     suggested_action: Optional[str] = Field(default=None, description="Optional suggested action to resolve the alert")
     ttl_seconds: Optional[int] = Field(default=None, description="Optional display duration in seconds for clients")
     timestamp: datetime = Field(default_factory=lambda: datetime.now(timezone.utc), description="UTC timestamp when the notification was generated")
+
+
+class NotificationConfig(BaseModel):
+    cooldown_seconds: int = Field(default=20, ge=0, description="Minimum seconds between notifications")
+    max_shoulder_angle_abs_deg: float = Field(default=7.0, ge=0, description="Max allowed absolute shoulder angle in degrees")
+    max_head_tilt_abs_deg: float = Field(default=10.0, ge=0, description="Max allowed absolute head tilt in degrees")
+    max_head_drop_ratio: float = Field(default=0.32, ge=0, description="Max allowed head-to-shoulder distance normalized by shoulder width")
