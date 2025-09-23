@@ -2,7 +2,7 @@ from fastapi import APIRouter, UploadFile, File, HTTPException, WebSocket
 from fastapi.responses import JSONResponse
 from starlette.websockets import WebSocketDisconnect
 
-from app.api.schemas import AnalyzeResponse, FeatureExtractionResponse
+from app.api.schemas import AnalyzeResponse, FeatureExtractionResponse, Notification, NotificationSeverity
 from app.services.pose_service import PoseService, PoseServiceUnavailable
 from app.services.feature_extractor import PostureFeatureExtractor
 
@@ -81,3 +81,15 @@ async def ws_analyze(websocket: WebSocket):
             await websocket.close()
         except Exception:
             pass
+
+
+@router.get("/reminder", response_model=Notification, tags=["notifications"]) 
+async def posture_reminder():
+    # Static reminder payload for now; can be made dynamic based on recent analysis
+    return Notification(
+        title="Posture Check",
+        message="Please straighten your back and align your head with your shoulders.",
+        severity=NotificationSeverity.warning,
+        suggested_action="Sit upright, relax shoulders, and keep screen at eye level.",
+        ttl_seconds=10,
+    )

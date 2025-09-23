@@ -19,6 +19,17 @@
       .good { color: #15803d; }
       .bad { color: #b91c1c; }
       .unknown { color: #6b7280; }
+
+      /* Toast notifications */
+      #toasts { position: fixed; top: 16px; right: 16px; width: min(340px, 92vw); display: flex; flex-direction: column; gap: 10px; z-index: 1000; }
+      .toast { border: 1px solid #e5e7eb; border-left: 6px solid #3b82f6; background: #ffffff; border-radius: 8px; padding: 12px 12px 12px 12px; box-shadow: 0 6px 18px rgba(0,0,0,0.08); display: grid; grid-template-columns: 1fr auto; gap: 8px; }
+      .toast h4 { margin: 0 0 4px 0; font-size: 14px; }
+      .toast p { margin: 0; font-size: 13px; color: #334155; }
+      .toast .meta { font-size: 12px; color: #64748b; margin-top: 6px; }
+      .toast button.toast-close { align-self: start; border: none; background: transparent; color: #64748b; cursor: pointer; padding: 0 4px; font-size: 16px; }
+      .toast.warning { border-left-color: #f59e0b; }
+      .toast.critical { border-left-color: #ef4444; }
+      .toast.info { border-left-color: #3b82f6; }
     </style>
   </head>
   <body>
@@ -32,6 +43,7 @@
         <div class="controls">
           <button id="startBtn">Start</button>
           <button id="stopBtn" disabled>Stop</button>
+          <button id="reminderBtn" title="Show posture reminder">Reminder</button>
           <label>FPS <input id="fps" type="number" min="1" max="120" value="30" style="width:60px"></label>
           <span>State: <span id="state" class="status unknown">idle</span></span>
         </div>
@@ -52,6 +64,9 @@
       </div>
     </div>
 
+    <!-- Toast container -->
+    <div id="toasts"></div>
+
     <script type="module">
       import { PoseLandmarker, FilesetResolver, DrawingUtils } from 'https://cdn.jsdelivr.net/npm/@mediapipe/tasks-vision@latest';
 
@@ -59,12 +74,14 @@
       const overlay = document.getElementById('overlay');
       const startBtn = document.getElementById('startBtn');
       const stopBtn = document.getElementById('stopBtn');
+      const reminderBtn = document.getElementById('reminderBtn');
       const stateEl = document.getElementById('state');
       const framesEl = document.getElementById('frames');
       const fpsInput = document.getElementById('fps');
       const modelEl = document.getElementById('model');
       const featuresEl = document.getElementById('features');
       const featureEveryInput = document.getElementById('featureEvery');
+      const toasts = document.getElementById('toasts');
 
       let landmarker = null;
       let stream = null;
@@ -197,6 +214,48 @@
 
       startBtn.addEventListener('click', start);
       stopBtn.addEventListener('click', stop);
+
+      // Notification helpers
+      function showToast(notification){
+        const { title, message, severity = 'info', suggested_action, ttl_seconds } = notification || {};
+        const toast = document.createElement('div');
+        toast.className = 'toast ' + String(severity);
+        const close = document.createElement('button');
+        close.className = 'toast-close';
+        close.setAttribute('aria-label', 'Close');
+        close.textContent = '×';
+        close.addEventListener('click', () => {
+          if (toast.parentNode) toast.parentNode.removeChild(toast);
+        });
+        const content = document.createElement('div');
+        const h4 = document.createElement('h4'); h4.textContent = title || 'Notification';
+        const p = document.createElement('p'); p.textContent = message || '';
+        content.appendChild(h4); content.appendChild(p);
+        if (suggested_action){
+          const meta = document.createElement('div');
+          meta.className = 'meta';
+          meta.textContent = suggested_action;
+          content.appendChild(meta);
+        }
+        toast.appendChild(content);
+        toast.appendChild(close);
+        toasts.appendChild(toast);
+        const ttl = Math.max(3, Math.min(60, parseInt(ttl_seconds || '0', 10) || 8));
+        setTimeout(() => { if (toast.parentNode) toast.parentNode.removeChild(toast); }, ttl * 1000);
+      }
+
+      async function fetchReminder(){
+        try {
+          const resp = await fetch('/api/reminder');
+          const data = await resp.json();
+          if (!resp.ok){ throw new Error(data && data.detail ? data.detail : ('HTTP ' + resp.status)); }
+          showToast(data);
+        } catch (e) {
+          showToast({ title: 'Error', message: String(e), severity: 'critical' });
+        }
+      }
+
+      reminderBtn.addEventListener('click', fetchReminder);
 
       // Resize overlay when metadata is loaded
       video.addEventListener('loadedmetadata', sizeCanvases);

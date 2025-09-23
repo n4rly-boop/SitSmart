@@ -1,4 +1,6 @@
 from typing import Any, Dict, Optional
+from enum import Enum
+from datetime import datetime, timezone
 
 from pydantic import BaseModel, Field
 
@@ -30,3 +32,18 @@ class FeatureExtractionResponse(BaseModel):
         default=None, description="Normalized landmarks [x,y] in [0,1] from MediaPipe Pose"
     )
     reason: Optional[str] = Field(default=None, description="Reason when features are None")
+
+
+class NotificationSeverity(str, Enum):
+    info = "info"
+    warning = "warning"
+    critical = "critical"
+
+
+class Notification(BaseModel):
+    title: str = Field(description="Short title for the notification")
+    message: str = Field(description="User-facing message prompting posture correction")
+    severity: NotificationSeverity = Field(description="Severity level for UI styling/priority")
+    suggested_action: Optional[str] = Field(default=None, description="Optional suggested action to resolve the alert")
+    ttl_seconds: Optional[int] = Field(default=None, description="Optional display duration in seconds for clients")
+    timestamp: datetime = Field(default_factory=lambda: datetime.now(timezone.utc), description="UTC timestamp when the notification was generated")
