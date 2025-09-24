@@ -2,7 +2,7 @@ from fastapi import APIRouter, UploadFile, File, HTTPException, WebSocket, Reque
 from fastapi.responses import JSONResponse
 from starlette.websockets import WebSocketDisconnect
 
-from app.api.schemas import AnalyzeResponse, FeatureExtractionResponse, Notification, NotificationSeverity
+from app.api.schemas import AnalyzeResponse, FeatureExtractionResponse, Notification, NotificationSeverity, RLAgentState
 from app.services.pose_service import PoseService, PoseServiceUnavailable
 from app.services.feature_extractor import PostureFeatureExtractor
 from app.services.notification_service import NotificationService
@@ -179,3 +179,9 @@ async def ws_notifications(websocket: WebSocket):
 @router.get("/notifications/last", response_model=Notification | None, tags=["notifications"])
 async def notifications_last():
     return _last_notification
+
+
+@router.get("/rl/state", response_model=RLAgentState, tags=["rl"])
+async def rl_state():
+    svc = NotificationService.get_instance()
+    return RLAgentState.model_validate(svc.get_rl_state())

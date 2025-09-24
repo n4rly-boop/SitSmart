@@ -60,6 +60,15 @@
         <div id="features" style="font-family:ui-monospace, SFMono-Regular, Menlo, monospace; font-size: 13px; white-space: pre-wrap; background:#f9fafb; border:1px dashed #e5e7eb; padding:8px; border-radius:6px; min-height:80px;">
           
         </div>
+        <hr />
+        <div style="display:flex;justify-content:space-between;align-items:center;gap:8px;">
+          <h3 style="margin:0;">RL Agent</h3>
+          <div style="display:flex;gap:8px;align-items:center;">
+            <label style="font-weight:normal;font-size:12px;">Auto <input id="rlAuto" type="number" min="0" max="60" value="1" style="width:46px"> s</label>
+            <button id="rlRefreshBtn">Refresh</button>
+          </div>
+        </div>
+        <div id="rlState" style="font-family:ui-monospace, SFMono-Regular, Menlo, monospace; font-size: 13px; white-space: pre-wrap; background:#f9fafb; border:1px dashed #e5e7eb; padding:8px; border-radius:6px; min-height:80px;"></div>
       </div>
     </div>
 
@@ -80,12 +89,16 @@
       const featuresEl = document.getElementById('features');
       const featureEveryInput = document.getElementById('featureEvery');
       const toasts = document.getElementById('toasts');
+      const rlStateEl = document.getElementById('rlState');
+      const rlRefreshBtn = document.getElementById('rlRefreshBtn');
+      const rlAutoInput = document.getElementById('rlAuto');
 
       let landmarker = null;
       let stream = null;
       let rafId = null;
       let frames = 0;
       let lastFeaturePayloadMs = 0;
+      let rlTimer = null;
 
       function setState(s){ stateEl.textContent = s; stateEl.className = 'status ' + (s || 'unknown'); }
 
@@ -134,6 +147,7 @@
         if (stream){ stream.getTracks().forEach(t => t.stop()); stream = null; }
         startBtn.disabled = false; stopBtn.disabled = true; setState('stopped');
         const ctx = overlay.getContext('2d'); ctx && ctx.clearRect(0,0,overlay.width, overlay.height);
+        if (rlTimer) { clearInterval(rlTimer); rlTimer = null; }
       }
 
       function frameToBlob(canvas){
@@ -184,6 +198,56 @@
         }
       }
 
+      async function fetchRLState(){
+        try {
+          const resp = await fetch('/api/rl/state');
+          const data = await resp.json();
+          if (!resp.ok) throw new Error(data && data.detail ? data.detail : ('HTTP ' + resp.status));
+          renderRLState(data);
+        } catch (e) {
+          rlStateEl.textContent = 'RL state error: ' + e;
+        }
+      }
+
+      function renderRLState(s){
+        if (!s || s.error){ rlStateEl.textContent = 'Unavailable'; return; }
+        const nowMs = Date.now();
+        const lastMs = Number(s.last_notified_at_ms || 0);
+        const since = lastMs ? Math.max(0, (nowMs - lastMs) / 1000) : null;
+        const w0 = (s.weights && s.weights.action_0) ? s.weights.action_0 : [];
+        const w1 = (s.weights && s.weights.action_1) ? s.weights.action_1 : [];
+        const w0s = w0.slice(0, 6).map(v => Number(v).toFixed(3)).join(', ');
+        const w1s = w1.slice(0, 6).map(v => Number(v).toFixed(3)).join(', ');
+        const cfg = s.config || {};
+        const r = s.rewards || {};
+        const rsum = r.sum || {}; const rcount = r.count || {}; const rlast = r.last || {};
+        const a0sum = Number(rsum['0'] || 0).toFixed(2); const a1sum = Number(rsum['1'] || 0).toFixed(2);
+        const a0cnt = Number(rcount['0'] || 0); const a1cnt = Number(rcount['1'] || 0);
+        const a0last = rlast['0'] === null || rlast['0'] === undefined ? '—' : Number(rlast['0']).toFixed(2);
+        const a1last = rlast['1'] === null || rlast['1'] === undefined ? '—' : Number(rlast['1']).toFixed(2);
+        const lines = [
+          `epsilon: ${Number(s.epsilon || 0).toFixed(4)}`,
+          `total_updates: ${Number(s.total_updates || 0)}`,
+          `cooldown_seconds: ${Number(s.cooldown_seconds || 0)}`,
+          `last_notified: ${lastMs ? (since.toFixed(1) + 's ago') : 'never'}`,
+          '',
+          'per-action rewards:',
+          `  a=0 sum=${a0sum} count=${a0cnt} last=${a0last}`,
+          `  a=1 sum=${a1sum} count=${a1cnt} last=${a1last}`,
+          '',
+          'weights:',
+          `  action_0 [${w0.length}]: [ ${w0s}${w0.length > 6 ? ', …' : ''} ]`,
+          `  action_1 [${w1.length}]: [ ${w1s}${w1.length > 6 ? ', …' : ''} ]`,
+          '',
+          'config:',
+          `  epsilon_start=${cfg.epsilon_start}, min=${cfg.epsilon_min}, decay=${cfg.epsilon_decay}`,
+          `  learning_rate=${cfg.learning_rate}, reward_window_seconds=${cfg.reward_window_seconds}`,
+          `  decision_interval_seconds=${cfg.decision_interval_seconds}`,
+          `  improvement_ratio_threshold=${cfg.improvement_ratio_threshold}`
+        ];
+        rlStateEl.textContent = lines.join('\n');
+      }
+
       function loop(){
         const ctx = overlay.getContext('2d');
         const draw = new DrawingUtils(ctx);
@@ -217,6 +281,14 @@
 
       startBtn.addEventListener('click', start);
       stopBtn.addEventListener('click', stop);
+      rlRefreshBtn.addEventListener('click', fetchRLState);
+      rlAutoInput.addEventListener('change', () => {
+        const sec = Math.max(0, Math.min(60, parseInt(rlAutoInput.value || '0', 10)));
+        if (rlTimer) { clearInterval(rlTimer); rlTimer = null; }
+        if (sec > 0) rlTimer = setInterval(fetchRLState, sec * 1000);
+      });
+      // start polling by default
+      (function initRL(){ try { fetchRLState(); } catch {} rlAutoInput.dispatchEvent(new Event('change')); })();
 
       // Notification helpers
       function showToast(notification){
