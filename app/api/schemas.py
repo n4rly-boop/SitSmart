@@ -34,6 +34,31 @@ class FeatureExtractionResponse(BaseModel):
     reason: Optional[str] = Field(default=None, description="Reason when features are None")
 
 
+class ModelAnalysisRequest(BaseModel):
+    """Generic analysis request passed to ML/RL services.
+
+    Accepts posture features and optional extras. The schema mirrors what
+    `PoseService.extract_features` returns under the `features` field.
+    """
+
+    features: FeatureVector
+    extras: Optional[Dict[str, Any]] = None
+
+
+class ModelAnalysisResponse(BaseModel):
+    """Generic analysis response from ML/RL services used by NotificationService.
+
+    - should_notify: model's decision whether to notify the user
+    - score: optional continuous score for debugging/thresholding
+    - reason: optional string for traceability
+    - details: optional model-specific metadata
+    """
+
+    should_notify: bool
+    score: Optional[float] = None
+    reason: Optional[str] = None
+    details: Optional[Dict[str, Any]] = None
+
 class NotificationSeverity(str, Enum):
     info = "info"
     warning = "warning"

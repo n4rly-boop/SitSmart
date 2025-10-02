@@ -51,10 +51,18 @@
         <div>Frames: <span id="frames">0</span></div>
         <div>Model: <span id="model">loading…</span></div>
         <hr />
-        <div style="display:flex;justify-content:space-between;align-items:center;gap:8px;">
+        <div style="display:flex;justify-content:space-between;align-items:center;gap:8px;flex-wrap:wrap;">
           <h3 style="margin:0;">Server Features</h3>
-          <label style="font-weight:normal;font-size:12px;">
-            Send every <input id="featureEvery" type="number" min="1" max="30" value="1" style="width:50px"> frames
+          <label style="font-weight:normal;font-size:12px;">Send every <input id="featureEvery" type="number" min="1" max="30" value="1" style="width:50px"> frames</label>
+          <label style="font-weight:normal;font-size:12px;display:flex;align-items:center;gap:6px;">
+            <input id="notifyEnabled" type="checkbox"> Enable notifications
+          </label>
+          <label style="font-weight:normal;font-size:12px;display:flex;align-items:center;gap:6px;">
+            Method
+            <select id="methodSelect" style="height:26px;">
+              <option value="rl" selected>RL</option>
+              <option value="ml">ML</option>
+            </select>
           </label>
         </div>
         <div id="features" style="font-family:ui-monospace, SFMono-Regular, Menlo, monospace; font-size: 13px; white-space: pre-wrap; background:#f9fafb; border:1px dashed #e5e7eb; padding:8px; border-radius:6px; min-height:80px;">
@@ -69,6 +77,11 @@
           </div>
         </div>
         <div id="rlState" style="font-family:ui-monospace, SFMono-Regular, Menlo, monospace; font-size: 13px; white-space: pre-wrap; background:#f9fafb; border:1px dashed #e5e7eb; padding:8px; border-radius:6px; min-height:80px;"></div>
+        <hr />
+        <div style="display:flex;justify-content:space-between;align-items:center;gap:8px;">
+          <h3 style="margin:0;">Notifications</h3>
+          <div style="font-size:12px;">Last notified: <span id="lastNotified">never</span></div>
+        </div>
       </div>
     </div>
 
@@ -92,6 +105,9 @@
       const rlStateEl = document.getElementById('rlState');
       const rlRefreshBtn = document.getElementById('rlRefreshBtn');
       const rlAutoInput = document.getElementById('rlAuto');
+      const lastNotifiedEl = document.getElementById('lastNotified');
+      const notifyEnabledInput = document.getElementById('notifyEnabled');
+      const methodSelect = document.getElementById('methodSelect');
 
       let landmarker = null;
       let stream = null;
@@ -99,6 +115,8 @@
       let frames = 0;
       let lastFeaturePayloadMs = 0;
       let rlTimer = null;
+      let notifyEnabled = false;
+      let decisionMethod = 'rl';
 
       function setState(s){ stateEl.textContent = s; stateEl.className = 'status ' + (s || 'unknown'); }
 
@@ -134,6 +152,8 @@
           await video.play();
           await loadModel();
           sizeCanvases();
+          // Clear server-side aggregation buffer on session start
+          try { await fetch('/api/features/aggregate/clear', { method: 'POST' }); } catch {}
           startBtn.disabled = true; stopBtn.disabled = false; setState('running');
           loop();
         } catch (e) {
@@ -192,6 +212,20 @@
             `shoulder_width_px: ${fv.shoulder_width_px.toFixed(1)}`
           ].join('\n');
           featuresEl.textContent = pretty;
+
+          // If notifications are enabled, add to buffer and trigger a decision
+          if (notifyEnabled) {
+            try {
+              await fetch('/api/features/aggregate/add', {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify(fv)
+              });
+            } catch {}
+            try {
+              await fetch(`/api/decide/from_buffer?method=${encodeURIComponent(decisionMethod)}`, { method: 'POST' });
+            } catch {}
+          }
         } catch (e) {
           console.error('[front] sendFeaturesSnapshot failed', e);
           featuresEl.textContent = String(e);
@@ -214,6 +248,8 @@
         const nowMs = Date.now();
         const lastMs = Number(s.last_notified_at_ms || 0);
         const since = lastMs ? Math.max(0, (nowMs - lastMs) / 1000) : null;
+        // Update separate notifications section
+        lastNotifiedEl.textContent = lastMs ? (since.toFixed(1) + 's ago') : 'never';
         const w0 = (s.weights && s.weights.action_0) ? s.weights.action_0 : [];
         const w1 = (s.weights && s.weights.action_1) ? s.weights.action_1 : [];
         const w0s = w0.slice(0, 6).map(v => Number(v).toFixed(3)).join(', ');
@@ -229,7 +265,6 @@
           `epsilon: ${Number(s.epsilon || 0).toFixed(4)}`,
           `total_updates: ${Number(s.total_updates || 0)}`,
           `cooldown_seconds: ${Number(s.cooldown_seconds || 0)}`,
-          `last_notified: ${lastMs ? (since.toFixed(1) + 's ago') : 'never'}`,
           '',
           'per-action rewards:',
           `  a=0 sum=${a0sum} count=${a0cnt} last=${a0last}`,
@@ -282,6 +317,11 @@
       startBtn.addEventListener('click', start);
       stopBtn.addEventListener('click', stop);
       rlRefreshBtn.addEventListener('click', fetchRLState);
+      notifyEnabledInput.addEventListener('change', () => { notifyEnabled = !!notifyEnabledInput.checked; });
+      methodSelect.addEventListener('change', () => { decisionMethod = String(methodSelect.value || 'rl'); });
+      // initialize defaults
+      notifyEnabled = !!notifyEnabledInput.checked;
+      decisionMethod = String(methodSelect.value || 'rl');
       rlAutoInput.addEventListener('change', () => {
         const sec = Math.max(0, Math.min(60, parseInt(rlAutoInput.value || '0', 10)));
         if (rlTimer) { clearInterval(rlTimer); rlTimer = null; }
