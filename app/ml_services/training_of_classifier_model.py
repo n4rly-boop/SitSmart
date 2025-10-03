@@ -21,23 +21,23 @@ print("\nNans:")
 print(data.isnull().sum())
 
 
-X_train, X_test, y_train, y_test = train_test_split(X, y, test_size=0.3, stratify=y, random_state=91)
+X_train, X_test, y_train, y_test = train_test_split(X, y, test_size=0.4, stratify=y, random_state=91)
 
 preprocessor = StandardScaler()
 X_train_processed = preprocessor.fit_transform(X_train)
 X_test_processed = preprocessor.transform(X_test)
 
 param_grid = {
-    'C': [0.01, 0.1, 1, 10, 100],
+    'C': [0.001, 0.01, 0.1, 1, 10, 100, 1000],
     'solver': ['sag', 'saga'],
 }
 
-classifier_model = LogisticRegression(max_iter=2000, random_state=91)
+classifier_model = LogisticRegression(max_iter=3000, random_state=91)
 
 grid_search = GridSearchCV(
     classifier_model,
     param_grid,
-    cv=8,
+    cv=12,
     scoring='f1_macro',
     n_jobs=-1,
     verbose=1)
