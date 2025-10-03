@@ -29,17 +29,17 @@ class RLConfig:
     learning_rate: float = 0.3
 
     # Reward window
-    reward_window_seconds: int = 3
+    reward_window_seconds: int = 5
     # Minimum seconds between agent decisions (throttling)
-    decision_interval_seconds: int = 1
+    decision_interval_seconds: int = 6
 
     # Considered a success if badness reduces by this fraction OR falls under thresholds
-    improvement_ratio_threshold: float = 0.3
+    improvement_ratio_threshold: float = 0.2
 
     # Feature scaling to keep values in a reasonable range for linear models
-    scale_shoulder_angle_deg: float = 30.0
-    scale_head_tilt_deg: float = 30.0
-    scale_head_drop_ratio: float = 1.0
+    scale_shoulder_angle_deg: float = 10.0
+    scale_head_tilt_deg: float = 15.0
+    scale_head_drop_ratio: float = 0.5
     scale_time_since_notify_s: float = 60.0
     scale_moving_avg_reward: float = 1.0
 

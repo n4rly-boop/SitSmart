@@ -14,7 +14,7 @@ from app.services.rl_service import RLService
 
 @dataclass
 class NotificationOptions:
-    cooldown_seconds: int = int(os.getenv("FEATURE_BUFFER_SECONDS", "5")) 
+    cooldown_seconds: int = max(int(os.getenv("FEATURE_BUFFER_SECONDS", "5")), int(os.getenv("NOTIFICATION_COOLDOWN_SECONDS", "5")))
     webhook_url: Optional[str] = None  # Default provided at runtime
     analyze_base_url: Optional[str] = None  # Base URL for model analyze routes
 
