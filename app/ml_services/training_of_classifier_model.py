@@ -6,11 +6,20 @@ from sklearn.preprocessing import StandardScaler
 from sklearn.linear_model import LogisticRegression
 from sklearn.metrics import classification_report, confusion_matrix, ConfusionMatrixDisplay
 
-path = r"..\app\data\dataset.csv"
+path = 'C:/Users/artem/Study/PMLaDL/SitSmart/app/data/features.csv'
 
 data = pd.read_csv(path)
+print(data.head())
+data = data.dropna()
+print(data.shape)
 y = data["label"]
-X = data.drop(["label"], axis=1).values
+X = data.drop(["image_name", "label"], axis=1).values
+
+data = pd.read_csv(path)
+print(data.head())
+print("\nNans:")
+print(data.isnull().sum())
+
 
 X_train, X_test, y_train, y_test = train_test_split(X, y, test_size=0.3, stratify=y, random_state=91)
 
@@ -52,11 +61,14 @@ print(classification_report(y_test, y_pred, target_names=["good posture", "bad_p
 # Visualisation
 ConfusionMatrixDisplay(cm, display_labels=["good posture", "bad_posture"]).plot(cmap='autumn')
 
-with open('../app/data/models/model.pkl', 'wb') as f:
-    pickle.dump(best_classifier, f)
-with open('../app/data/models/scaler.pkl', 'wb') as f:
-    scaler = pickle.load(f)
+model_path = 'C:/Users/artem/Study/PMLaDL/SitSmart/app/models/model.pkl'
+scaler_path = 'C:/Users/artem/Study/PMLaDL/SitSmart/app/models/scaler.pkl'
 
-def get_prediction(input_data):
-    scaled = scaler.transform(input_data)
-    return best_classifier.predict(scaled)
+with open(model_path, 'wb') as f:
+    pickle.dump(best_classifier, f)
+
+with open(scaler_path, 'wb') as f:
+    pickle.dump(preprocessor, f)
+
+print(f"Model saved to {model_path}")
+print(f"Scaler saved to {scaler_path}")
