@@ -19,6 +19,17 @@
       .good { color: #15803d; }
       .bad { color: #b91c1c; }
       .unknown { color: #6b7280; }
+
+      /* Toast notifications */
+      #toasts { position: fixed; top: 16px; right: 16px; width: min(340px, 92vw); display: flex; flex-direction: column; gap: 10px; z-index: 1000; }
+      .toast { border: 1px solid #e5e7eb; border-left: 6px solid #3b82f6; background: #ffffff; border-radius: 8px; padding: 12px 12px 12px 12px; box-shadow: 0 6px 18px rgba(0,0,0,0.08); display: grid; grid-template-columns: 1fr auto; gap: 8px; }
+      .toast h4 { margin: 0 0 4px 0; font-size: 14px; }
+      .toast p { margin: 0; font-size: 13px; color: #334155; }
+      .toast .meta { font-size: 12px; color: #64748b; margin-top: 6px; }
+      .toast button.toast-close { align-self: start; border: none; background: transparent; color: #64748b; cursor: pointer; padding: 0 4px; font-size: 16px; }
+      .toast.warning { border-left-color: #f59e0b; }
+      .toast.critical { border-left-color: #ef4444; }
+      .toast.info { border-left-color: #3b82f6; }
     </style>
   </head>
   <body>
@@ -40,17 +51,42 @@
         <div>Frames: <span id="frames">0</span></div>
         <div>Model: <span id="model">loading…</span></div>
         <hr />
-        <div style="display:flex;justify-content:space-between;align-items:center;gap:8px;">
+        <div style="display:flex;justify-content:space-between;align-items:center;gap:8px;flex-wrap:wrap;">
           <h3 style="margin:0;">Server Features</h3>
-          <label style="font-weight:normal;font-size:12px;">
-            Send every <input id="featureEvery" type="number" min="1" max="30" value="1" style="width:50px"> frames
+          <label style="font-weight:normal;font-size:12px;">Send every <input id="featureEvery" type="number" min="1" max="30" value="1" style="width:50px"> frames</label>
+          <label style="font-weight:normal;font-size:12px;display:flex;align-items:center;gap:6px;">
+            <input id="notifyEnabled" type="checkbox"> Enable notifications
+          </label>
+          <label style="font-weight:normal;font-size:12px;display:flex;align-items:center;gap:6px;">
+            Method
+            <select id="methodSelect" style="height:26px;">
+              <option value="rl" selected>RL</option>
+              <option value="ml">ML</option>
+            </select>
           </label>
         </div>
         <div id="features" style="font-family:ui-monospace, SFMono-Regular, Menlo, monospace; font-size: 13px; white-space: pre-wrap; background:#f9fafb; border:1px dashed #e5e7eb; padding:8px; border-radius:6px; min-height:80px;">
           
         </div>
+        <hr />
+        <div style="display:flex;justify-content:space-between;align-items:center;gap:8px;">
+          <h3 style="margin:0;">RL Agent</h3>
+          <div style="display:flex;gap:8px;align-items:center;">
+            <label style="font-weight:normal;font-size:12px;">Auto <input id="rlAuto" type="number" min="0" max="60" value="1" style="width:46px"> s</label>
+            <button id="rlRefreshBtn">Refresh</button>
+          </div>
+        </div>
+        <div id="rlState" style="font-family:ui-monospace, SFMono-Regular, Menlo, monospace; font-size: 13px; white-space: pre-wrap; background:#f9fafb; border:1px dashed #e5e7eb; padding:8px; border-radius:6px; min-height:80px;"></div>
+        <hr />
+        <div style="display:flex;justify-content:space-between;align-items:center;gap:8px;">
+          <h3 style="margin:0;">Notifications</h3>
+          <div style="font-size:12px;">Last notified: <span id="lastNotified">never</span></div>
+        </div>
       </div>
     </div>
+
+    <!-- Toast container -->
+    <div id="toasts"></div>
 
     <script type="module">
       import { PoseLandmarker, FilesetResolver, DrawingUtils } from 'https://cdn.jsdelivr.net/npm/@mediapipe/tasks-vision@latest';
@@ -65,12 +101,22 @@
       const modelEl = document.getElementById('model');
       const featuresEl = document.getElementById('features');
       const featureEveryInput = document.getElementById('featureEvery');
+      const toasts = document.getElementById('toasts');
+      const rlStateEl = document.getElementById('rlState');
+      const rlRefreshBtn = document.getElementById('rlRefreshBtn');
+      const rlAutoInput = document.getElementById('rlAuto');
+      const lastNotifiedEl = document.getElementById('lastNotified');
+      const notifyEnabledInput = document.getElementById('notifyEnabled');
+      const methodSelect = document.getElementById('methodSelect');
 
       let landmarker = null;
       let stream = null;
       let rafId = null;
       let frames = 0;
       let lastFeaturePayloadMs = 0;
+      let rlTimer = null;
+      let notifyEnabled = false;
+      let decisionMethod = 'rl';
 
       function setState(s){ stateEl.textContent = s; stateEl.className = 'status ' + (s || 'unknown'); }
 
@@ -106,6 +152,8 @@
           await video.play();
           await loadModel();
           sizeCanvases();
+          // Clear server-side aggregation buffer on session start
+          try { await fetch('/api/features/aggregate/clear', { method: 'POST' }); } catch {}
           startBtn.disabled = true; stopBtn.disabled = false; setState('running');
           loop();
         } catch (e) {
@@ -119,6 +167,7 @@
         if (stream){ stream.getTracks().forEach(t => t.stop()); stream = null; }
         startBtn.disabled = false; stopBtn.disabled = true; setState('stopped');
         const ctx = overlay.getContext('2d'); ctx && ctx.clearRect(0,0,overlay.width, overlay.height);
+        if (rlTimer) { clearInterval(rlTimer); rlTimer = null; }
       }
 
       function frameToBlob(canvas){
@@ -140,14 +189,18 @@
           const blob = await frameToBlob(temp);
           const form = new FormData(); form.append('image', blob, 'frame.jpg');
           const resp = await fetch('/api/features', { method: 'POST', body: form });
+          console.log('[front] POST /api/features sent');
           let data = null;
-          try { data = await resp.json(); } catch (e) { /* ignore parse errors */ }
+          try { data = await resp.json(); } catch (e) { console.warn('[front] /api/features JSON parse failed', e); }
           if (!resp.ok) {
             const msg = data && data.detail ? data.detail : ('HTTP ' + resp.status);
+            console.error('[front] /api/features error', msg);
             throw new Error(msg);
           }
+          console.log('[front] /api/features ok');
           const fv = data.features;
           if (!fv){
+            console.warn('[front] /api/features no features in response', data);
             featuresEl.textContent = JSON.stringify(data, null, 2);
             return;
           }
@@ -159,9 +212,75 @@
             `shoulder_width_px: ${fv.shoulder_width_px.toFixed(1)}`
           ].join('\n');
           featuresEl.textContent = pretty;
+
+          // If notifications are enabled, add to buffer and trigger a decision
+          if (notifyEnabled) {
+            try {
+              await fetch('/api/features/aggregate/add', {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify(fv)
+              });
+            } catch {}
+            try {
+              await fetch(`/api/decide/from_buffer?method=${encodeURIComponent(decisionMethod)}`, { method: 'POST' });
+            } catch {}
+          }
         } catch (e) {
+          console.error('[front] sendFeaturesSnapshot failed', e);
           featuresEl.textContent = String(e);
         }
+      }
+
+      async function fetchRLState(){
+        try {
+          const resp = await fetch('/api/rl/state');
+          const data = await resp.json();
+          if (!resp.ok) throw new Error(data && data.detail ? data.detail : ('HTTP ' + resp.status));
+          renderRLState(data);
+        } catch (e) {
+          rlStateEl.textContent = 'RL state error: ' + e;
+        }
+      }
+
+      function renderRLState(s){
+        if (!s || s.error){ rlStateEl.textContent = 'Unavailable'; return; }
+        const nowMs = Date.now();
+        const lastMs = Number(s.last_notified_at_ms || 0);
+        const since = lastMs ? Math.max(0, (nowMs - lastMs) / 1000) : null;
+        // Update separate notifications section
+        lastNotifiedEl.textContent = lastMs ? (since.toFixed(1) + 's ago') : 'never';
+        const w0 = (s.weights && s.weights.action_0) ? s.weights.action_0 : [];
+        const w1 = (s.weights && s.weights.action_1) ? s.weights.action_1 : [];
+        const w0s = w0.slice(0, 6).map(v => Number(v).toFixed(3)).join(', ');
+        const w1s = w1.slice(0, 6).map(v => Number(v).toFixed(3)).join(', ');
+        const cfg = s.config || {};
+        const r = s.rewards || {};
+        const rsum = r.sum || {}; const rcount = r.count || {}; const rlast = r.last || {};
+        const a0sum = Number(rsum['0'] || 0).toFixed(2); const a1sum = Number(rsum['1'] || 0).toFixed(2);
+        const a0cnt = Number(rcount['0'] || 0); const a1cnt = Number(rcount['1'] || 0);
+        const a0last = rlast['0'] === null || rlast['0'] === undefined ? '—' : Number(rlast['0']).toFixed(2);
+        const a1last = rlast['1'] === null || rlast['1'] === undefined ? '—' : Number(rlast['1']).toFixed(2);
+        const lines = [
+          `epsilon: ${Number(s.epsilon || 0).toFixed(4)}`,
+          `total_updates: ${Number(s.total_updates || 0)}`,
+          `cooldown_seconds: ${Number(s.cooldown_seconds || 0)}`,
+          '',
+          'per-action rewards:',
+          `  a=0 sum=${a0sum} count=${a0cnt} last=${a0last}`,
+          `  a=1 sum=${a1sum} count=${a1cnt} last=${a1last}`,
+          '',
+          'weights:',
+          `  action_0 [${w0.length}]: [ ${w0s}${w0.length > 6 ? ', …' : ''} ]`,
+          `  action_1 [${w1.length}]: [ ${w1s}${w1.length > 6 ? ', …' : ''} ]`,
+          '',
+          'config:',
+          `  epsilon_start=${cfg.epsilon_start}, min=${cfg.epsilon_min}, decay=${cfg.epsilon_decay}`,
+          `  learning_rate=${cfg.learning_rate}, reward_window_seconds=${cfg.reward_window_seconds}`,
+          `  decision_interval_seconds=${cfg.decision_interval_seconds}`,
+          `  improvement_ratio_threshold=${cfg.improvement_ratio_threshold}`
+        ];
+        rlStateEl.textContent = lines.join('\n');
       }
 
       function loop(){
@@ -197,6 +316,84 @@
 
       startBtn.addEventListener('click', start);
       stopBtn.addEventListener('click', stop);
+      rlRefreshBtn.addEventListener('click', fetchRLState);
+      notifyEnabledInput.addEventListener('change', () => { notifyEnabled = !!notifyEnabledInput.checked; });
+      methodSelect.addEventListener('change', () => { decisionMethod = String(methodSelect.value || 'rl'); });
+      // initialize defaults
+      notifyEnabled = !!notifyEnabledInput.checked;
+      decisionMethod = String(methodSelect.value || 'rl');
+      rlAutoInput.addEventListener('change', () => {
+        const sec = Math.max(0, Math.min(60, parseInt(rlAutoInput.value || '0', 10)));
+        if (rlTimer) { clearInterval(rlTimer); rlTimer = null; }
+        if (sec > 0) rlTimer = setInterval(fetchRLState, sec * 1000);
+      });
+      // start polling by default
+      (function initRL(){ try { fetchRLState(); } catch {} rlAutoInput.dispatchEvent(new Event('change')); })();
+
+      // Notification helpers
+      function showToast(notification){
+        const { title, message, severity = 'info', suggested_action, ttl_seconds } = notification || {};
+        const toast = document.createElement('div');
+        toast.className = 'toast ' + String(severity);
+        const close = document.createElement('button');
+        close.className = 'toast-close';
+        close.setAttribute('aria-label', 'Close');
+        close.textContent = '×';
+        close.addEventListener('click', () => {
+          if (toast.parentNode) toast.parentNode.removeChild(toast);
+        });
+        const content = document.createElement('div');
+        const h4 = document.createElement('h4'); h4.textContent = title || 'Notification';
+        const p = document.createElement('p'); p.textContent = message || '';
+        content.appendChild(h4); content.appendChild(p);
+        if (suggested_action){
+          const meta = document.createElement('div');
+          meta.className = 'meta';
+          meta.textContent = suggested_action;
+          content.appendChild(meta);
+        }
+        toast.appendChild(content);
+        toast.appendChild(close);
+        toasts.appendChild(toast);
+        const ttl = Math.max(3, Math.min(60, parseInt(ttl_seconds || '0', 10) || 8));
+        setTimeout(() => { if (toast.parentNode) toast.parentNode.removeChild(toast); }, ttl * 1000);
+      }
+
+      // Webhook-based notifications: subscribe to backend broadcast via WS
+      (function setupNotificationWebSocket(){
+        let ws = null;
+        function connect(){
+          try {
+            const proto = location.protocol === 'https:' ? 'wss' : 'ws';
+            ws = new WebSocket(`${proto}://${location.host}/api/ws/notifications`);
+            console.log('[front] WS connect', ws.url);
+            ws.onmessage = (evt) => {
+              try {
+                const data = JSON.parse(evt.data);
+                if (data && data.status === 'ready'){
+                  console.log('[front] WS ready');
+                  // Fetch last notification in case we missed broadcast during handshake
+                  fetch('/api/notifications/last').then(r => r.json()).then(last => {
+                    if (last && last.title && last.message){
+                      console.log('[front] Fetch last notification', last);
+                      showToast(last);
+                    }
+                  }).catch(() => {});
+                } else if (data && data.title && data.message){
+                  console.log('[front] WS notification', data);
+                  showToast(data);
+                }
+              } catch {}
+            };
+            ws.onopen = () => { console.log('[front] WS open'); };
+            ws.onerror = (e) => { console.error('[front] WS error', e); };
+            ws.onclose = () => { console.warn('[front] WS closed; reconnecting'); setTimeout(connect, 1500); };
+          } catch {
+            // ignore
+          }
+        }
+        connect();
+      })();
 
       // Resize overlay when metadata is loaded
       video.addEventListener('loadedmetadata', sizeCanvases);
