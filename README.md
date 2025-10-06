@@ -56,9 +56,17 @@ app/
   api/
     routes.py
     schemas.py
+  ml_rtaining/
+    data/
+      features.csv
+    training_of_classifier_model
+  models/
+    model.plk
+    scaler.plk
   services/
     pose_service.py
     rl_service.py
+    ml_service.py
     notification_service.py
     feature_buffer.py
   utils/

@@ -7,6 +7,7 @@ from app.services.pose_service import PoseService, PoseServiceUnavailable
 from app.services.notification_service import NotificationService
 from app.services.feature_buffer import FeatureBuffer
 from app.services.rl_service import RLService
+from app.services.ml_service import MLService
 
 router = APIRouter()
 
@@ -131,8 +132,9 @@ async def rl_analyze(payload: ModelAnalysisRequest):
 
 # Future ML analyze stub with the same contract
 @router.post("/ml/analyze", response_model=ModelAnalysisResponse, tags=["ml"])
-async def ml_analyze_stub(payload: ModelAnalysisRequest):
-    return ModelAnalysisResponse(should_notify=False, reason="ml-stub")
+async def ml_analyze(payload: ModelAnalysisRequest):
+    resp = MLService.get_instance().analyze(payload)
+    return resp
 
 
 # Decide using the server buffer (mean over window), then notify
@@ -155,7 +157,9 @@ async def decide_from_buffer(method: str = "rl"):
     if method == "rl":
         resp = RLService.get_instance().analyze(ModelAnalysisRequest(features=FeatureVector(**mean_features)))
     else:
-        resp = ModelAnalysisResponse(should_notify=False, reason="ml-stub")
+        resp = MLService.get_instance().analyze(
+            ModelAnalysisRequest(features=FeatureVector(**mean_features))
+        )
     return resp
 
 # Feature aggregation management endpoints
