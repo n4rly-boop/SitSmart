@@ -6,7 +6,7 @@ from sklearn.preprocessing import StandardScaler
 from sklearn.linear_model import LogisticRegression
 from sklearn.metrics import classification_report, confusion_matrix, ConfusionMatrixDisplay
 
-path = 'C:/Users/artem/Study/PMLaDL/SitSmart/app/data/features.csv'
+path = 'C:/Users/artem/Study/PMLaDL/SitSmart/app/ml_training/data/features.csv'
 
 data = pd.read_csv(path)
 print(data.head())

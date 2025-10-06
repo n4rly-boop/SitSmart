@@ -98,12 +98,14 @@ class NotificationService:
             # Pause RL training while ML drives decisions
             RLService.get_instance().set_training_enabled(False)
             # Placeholder ML path with same contract (stub decision false)
-            response = ModelAnalysisResponse(should_notify=False, reason="ml-stub")
+            from app.services.ml_service import MLService
+            response = MLService.get_instance().analyze(
+                ModelAnalysisRequest(features=FeatureVector(**features))
+            )
 
         if not isinstance(response, ModelAnalysisResponse):
             return False
 
-        import time
         now_ms = int(time.time() * 1000)
         if not response.should_notify:
             return False
@@ -114,4 +116,3 @@ class NotificationService:
         self.send_via_webhook(notif)
         self._mark_notified(now_ms)
         return True
-

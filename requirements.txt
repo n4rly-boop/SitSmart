@@ -4,6 +4,7 @@ pydantic>=2.7.0
 python-multipart>=0.0.9
 numpy>=1.26.0
 pillow>=10.3.0
+scikit-learn>=1.3.0
 
 # Pose estimation runtime
 mediapipe>=0.10.14
