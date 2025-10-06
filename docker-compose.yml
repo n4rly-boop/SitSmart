@@ -8,4 +8,7 @@ services:
       - "8000:8000"
     environment:
       - PYTHONUNBUFFERED=1
+      - FEATURE_BUFFER_SECONDS=${FEATURE_BUFFER_SECONDS:-5}
+      - NOTIFICATION_WEBHOOK_URL=${NOTIFICATION_WEBHOOK_URL:-http://127.0.0.1:8000/api/notifications/webhook}
+      - RL_AGENT_STATE_PATH=${RL_AGENT_STATE_PATH:-/app/train/rl_agent_state.json}
     restart: unless-stopped
