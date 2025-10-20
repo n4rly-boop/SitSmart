@@ -9,6 +9,8 @@ import asyncio
 from typing import Dict, Optional
 
 from app.api.schemas import Notification, NotificationSeverity, ModelAnalysisResponse
+from app.services.rl_service import EpsilonGreedyAgent
+from app.services.history_service import HistoryService
 
 
 @dataclass
@@ -75,14 +77,25 @@ class NotificationService:
         except Exception:
             pass
 
-    def maybe_notify_from_ml_response(self, response: ModelAnalysisResponse) -> bool:
+    def maybe_notify_from_ml_response(self, response: ModelAnalysisResponse, f1_features: Optional[Dict[str, float]] = None) -> bool:
         now_ms = int(time.time() * 1000)
         bad_prob = response.bad_posture_prob or 0.0
-        if bad_prob < float(self.options.ml_bad_prob_threshold):
+        rl_threshold = float(self.options.ml_bad_prob_threshold)
+        try:
+            rl_threshold = EpsilonGreedyAgent.get_instance().suggest_threshold(bad_prob)
+        except Exception:
+            rl_threshold = float(self.options.ml_bad_prob_threshold)
+
+        if bad_prob < float(rl_threshold):
             return False
         if not self._can_notify(now_ms):
             return False
         notif = self.build_notification()
         self.send_via_webhook(notif)
         self._mark_notified(now_ms)
+        # Record notification for RL history (delta computed asynchronously)
+        try:
+            HistoryService.get_instance().on_notification(bad_prob, rl_threshold, now_ms, f1_features=f1_features)
+        except Exception:
+            pass
         return True

@@ -3,16 +3,18 @@ from fastapi.responses import JSONResponse
 from starlette.websockets import WebSocketDisconnect
 
 from app.api.schemas import FeatureExtractionResponse, Notification, NotificationSeverity, ModelAnalysisRequest, ModelAnalysisResponse, FeatureVector, NotificationConfig, NotificationConfigUpdate
+from app.services.history_service import HistoryService
 from app.services.pose_service import PoseService, PoseServiceUnavailable
 from app.services.notification_service import NotificationService
-from app.services.feature_buffer import FeatureBuffer
+from app.services.rl_service import EpsilonGreedyAgent
+from app.services.feature_aggregate_service import FeatureAggregateService
 from app.services.ml_service import MLService
 
 router = APIRouter()
 
 _notification_ws_clients = set()
 _last_notification: Notification | None = None
-_buffer = FeatureBuffer()
+_agg = FeatureAggregateService.get_instance()
 
 
 @router.get("/health", tags=["system"])
@@ -130,7 +132,7 @@ async def ml_analyze(payload: ModelAnalysisRequest):
 @router.post("/decide/from_buffer", response_model=ModelAnalysisResponse, tags=["decision"])
 async def decide_from_buffer():
     try:
-        mean_features = _buffer.mean()
+        mean_features = _agg.mean_features()
     except Exception:
         mean_features = None
     if not mean_features:
@@ -138,7 +140,8 @@ async def decide_from_buffer():
     # Call ML once, use score for notification decision
     resp = MLService.get_instance().analyze(ModelAnalysisRequest(features=FeatureVector(**mean_features)))
     try:
-        NotificationService.get_instance().maybe_notify_from_ml_response(resp)
+        # Pass f1 (mean_features) to history via notification service
+        NotificationService.get_instance().maybe_notify_from_ml_response(resp, f1_features=mean_features)
     except Exception:
         pass
     return resp
@@ -175,22 +178,73 @@ async def notifications_config_update(payload: NotificationConfigUpdate):
 @router.post("/features/aggregate/add", tags=["aggregation"])
 async def features_aggregate_add(payload: FeatureVector):
     try:
-        _buffer.add(payload.model_dump())
+        _agg.add_features(payload.model_dump())
     except Exception:
         pass
+    # History service will fetch live features via HTTP when needed
     return {"ok": True}
+
+
+@router.get("/features", tags=["analysis"])
+async def get_latest_features():
+    # Provide the latest mean-less, single-sample features that were last added to the buffer
+    # We approximate latest by returning the current buffer mean to keep a simple server-side contract
+    # but the HistoryService will call this endpoint after delta_range seconds to sample f2.
+    try:
+        features_only = _agg.last_features()
+    except Exception:
+        features_only = None
+    return {"features": features_only}
+
+
+@router.get("/rl/threshold", tags=["rl"])
+async def rl_threshold():
+    try:
+        thr = EpsilonGreedyAgent.get_instance().get_current_threshold()
+    except Exception:
+        try:
+            thr = float(NotificationService.get_instance().options.ml_bad_prob_threshold)
+        except Exception:
+            thr = 0.6
+    return {"threshold": float(thr)}
+
+
+@router.get("/rl/history", tags=["rl"])
+async def rl_history():
+    hist = HistoryService.get_instance().get_notification_history()
+    # Take last 5 entries, most recent first
+    last5 = list(hist[-5:])[::-1]
+    data = []
+    for r in last5:
+        try:
+            data.append({
+                "bad_posture_prob": float(r.bad_posture_prob),
+                "delta": None if r.delta is None else float(r.delta),
+                "threshold": float(r.threshold),
+                "timestamp_ms": int(r.timestamp_ms),
+            })
+        except Exception:
+            continue
+    return {"history": data}
+
+
+@router.post("/rl/threshold/decide", tags=["rl"])
+async def rl_threshold_decide(payload: dict):
+    try:
+        bad_prob = float(payload.get("bad_posture_prob", 0.0))
+    except Exception:
+        bad_prob = 0.0
+    thr = EpsilonGreedyAgent.get_instance().suggest_threshold(bad_prob)
+    return {"threshold": float(thr)}
 
 
 @router.get("/features/aggregate/mean", tags=["aggregation"])
 async def features_aggregate_mean():
-    mean = _buffer.mean()
+    mean = _agg.mean_features()
     return {"features": mean}
 
 
 @router.post("/features/aggregate/clear", tags=["aggregation"])
 async def features_aggregate_clear():
-    from app.services.feature_buffer import FeatureBuffer as _FB
-    # reinitialize buffer to clear it
-    global _buffer
-    _buffer = _FB(window_seconds=_buffer.window_seconds)
+    _agg.clear()
     return {"ok": True}

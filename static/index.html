@@ -57,7 +57,7 @@
           <label style="font-weight:normal;font-size:12px;display:flex;align-items:center;gap:6px;">
             <input id="notifyEnabled" type="checkbox"> Enable notifications
           </label>
-          <label style="font-weight:normal;font-size:12px;">Cooldown s <input id="cooldownSec" type="number" min="0" max="3600" value="5" style="width:60px"></label>
+          <label style="font-weight:normal;font-size:12px;">Cooldown s <input id="cooldownSec" type="number" min="0" max="3600" value="6" style="width:60px"></label>
           <label style="font-weight:normal;font-size:12px;">ML threshold <input id="mlThreshold" type="number" min="0" max="1" step="0.01" value="0.60" style="width:70px"></label>
           <button id="saveConfigBtn">Save</button>
         </div>
@@ -69,6 +69,13 @@
         <div style="display:flex;justify-content:space-between;align-items:center;gap:8px;">
           <h3 style="margin:0;">Notifications</h3>
           <div style="font-size:12px;">Last notified: <span id="lastNotified">never</span></div>
+        </div>
+        <div style="display:flex;justify-content:space-between;align-items:center;gap:8px;flex-wrap:wrap;margin-top:8px;">
+          <div>Current threshold: <span id="rlThreshold">—</span></div>
+        </div>
+        <div style="margin-top:10px;">
+          <div style="font-weight:600;margin-bottom:6px;">Last 5 notifications</div>
+          <div id="rlHistory" style="font-family:ui-monospace, SFMono-Regular, Menlo, monospace; font-size: 12px; white-space: pre-wrap; background:#f9fafb; border:1px dashed #e5e7eb; padding:8px; border-radius:6px; min-height:60px;"></div>
         </div>
       </div>
     </div>
@@ -298,6 +305,35 @@
       notifyEnabled = !!notifyEnabledInput.checked;
       loadNotificationConfig();
       setInterval(updateLastNotified, 1000);
+
+      async function refreshRlPanel(){
+        // Threshold
+        try {
+          const r = await fetch('/api/rl/threshold');
+          const j = await r.json();
+          const thr = Number(j && j.threshold);
+          const el = document.getElementById('rlThreshold');
+          el.textContent = Number.isFinite(thr) ? thr.toFixed(2) : '—';
+        } catch {}
+        // History
+        try {
+          const r = await fetch('/api/rl/history');
+          const j = await r.json();
+          const list = (j && Array.isArray(j.history)) ? j.history : [];
+          const html = list.map((e) => {
+            const ts = e && e.timestamp_ms ? new Date(e.timestamp_ms).toLocaleTimeString() : '';
+            const bp = (e && typeof e.bad_posture_prob === 'number' && isFinite(e.bad_posture_prob)) ? e.bad_posture_prob.toFixed(2) : '—';
+            const dt = (e && typeof e.delta === 'number' && isFinite(e.delta)) ? e.delta.toFixed(3) : '—';
+            const th = (e && typeof e.threshold === 'number' && isFinite(e.threshold)) ? e.threshold.toFixed(2) : '—';
+            return `<div>t=${ts}  prob=${bp}  delta=${dt}  thr=${th}</div>`;
+          }).join('');
+          const el = document.getElementById('rlHistory');
+          el.innerHTML = html || '<div>no history</div>';
+        } catch {}
+      }
+
+      refreshRlPanel();
+      setInterval(refreshRlPanel, 2000);
 
       // Notification helpers
       function showToast(notification){
