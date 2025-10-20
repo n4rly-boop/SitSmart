@@ -8,7 +8,7 @@ from dataclasses import dataclass
 import asyncio
 from typing import Dict, Optional
 
-from app.api.schemas import Notification, NotificationSeverity, ModelAnalysisRequest, ModelAnalysisResponse, FeatureVector
+from app.api.schemas import Notification, NotificationSeverity, ModelAnalysisResponse
 
 
 @dataclass
@@ -76,25 +76,7 @@ class NotificationService:
             pass
 
 
-    def decide_and_notify(self, features: Optional[Dict[str, float]]) -> bool:
-        """Query ML for confidence and notify if above threshold and cooldown allows."""
-        if not features:
-            return False
-        try:
-            fv = FeatureVector(**features)  # type: ignore[arg-type]
-        except Exception:
-            return False
-
-        # Always use ML for decision confidence
-        from app.services.ml_service import MLService
-        response = MLService.get_instance().analyze(
-            ModelAnalysisRequest(features=fv)
-        )
-
-        if not isinstance(response, ModelAnalysisResponse):
-            return False
-
-        return self.maybe_notify_from_ml_response(features, response)
+    
 
     def maybe_notify_from_ml_response(self, features: Optional[Dict[str, float]], response: ModelAnalysisResponse) -> bool:
         if not features:
