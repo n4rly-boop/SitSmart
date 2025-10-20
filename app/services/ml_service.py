@@ -57,7 +57,7 @@ class MLService:
             score=bad_prob,
             reason=f"ml-classifier (class={prediction})",
             details={
-                "predicted_class": int(prediction),
+                "predicted_class": prediction,
                 "class_label": "bad_posture" if prediction == 1 else "good_posture",
                 "good_posture_prob": good_prob,
                 "bad_posture_prob": bad_prob

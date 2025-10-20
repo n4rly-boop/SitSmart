@@ -2,11 +2,10 @@ from fastapi import APIRouter, UploadFile, File, HTTPException, WebSocket
 from fastapi.responses import JSONResponse
 from starlette.websockets import WebSocketDisconnect
 
-from app.api.schemas import FeatureExtractionResponse, Notification, NotificationSeverity, RLAgentState, ModelAnalysisRequest, ModelAnalysisResponse, FeatureVector
+from app.api.schemas import FeatureExtractionResponse, Notification, NotificationSeverity, ModelAnalysisRequest, ModelAnalysisResponse, FeatureVector, NotificationConfig, NotificationConfigUpdate
 from app.services.pose_service import PoseService, PoseServiceUnavailable
 from app.services.notification_service import NotificationService
 from app.services.feature_buffer import FeatureBuffer
-from app.services.rl_service import RLService
 from app.services.ml_service import MLService
 
 router = APIRouter()
@@ -117,17 +116,7 @@ async def notifications_last():
     return _last_notification
 
 
-@router.get("/rl/state", response_model=RLAgentState, tags=["rl"])
-async def rl_state():
-    # delegate to RL service
-    return RLAgentState.model_validate(RLService.get_instance().get_state())
-
-
-# RL analyze route (same contract as future ML analyze route)
-@router.post("/rl/analyze", response_model=ModelAnalysisResponse, tags=["rl"])
-async def rl_analyze(payload: ModelAnalysisRequest):
-    resp = RLService.get_instance().analyze(payload)
-    return resp
+# RL endpoints intentionally removed from main flow
 
 
 # Future ML analyze stub with the same contract
@@ -137,30 +126,50 @@ async def ml_analyze(payload: ModelAnalysisRequest):
     return resp
 
 
-# Decide using the server buffer (mean over window), then notify
+# Decide using the server buffer (mean over window) via ML, then notify if above threshold
 @router.post("/decide/from_buffer", response_model=ModelAnalysisResponse, tags=["decision"])
-async def decide_from_buffer(method: str = "rl"):
+async def decide_from_buffer():
     try:
         mean_features = _buffer.mean()
     except Exception:
         mean_features = None
     if not mean_features:
         return ModelAnalysisResponse(should_notify=False, reason="no-features")
-    # Toggle RL training according to method
+    # Call ML once, use score for notification decision
+    resp = MLService.get_instance().analyze(ModelAnalysisRequest(features=FeatureVector(**mean_features)))
     try:
-        from app.services.rl_service import RLService as _RS
-        _RS.get_instance().set_training_enabled(method == "rl")
+        NotificationService.get_instance().maybe_notify_from_ml_response(mean_features, resp)
     except Exception:
         pass
-    NotificationService.get_instance().decide_and_notify(mean_features, method=method)
-    # Also return model decision for clients who call this endpoint
-    if method == "rl":
-        resp = RLService.get_instance().analyze(ModelAnalysisRequest(features=FeatureVector(**mean_features)))
-    else:
-        resp = MLService.get_instance().analyze(
-            ModelAnalysisRequest(features=FeatureVector(**mean_features))
-        )
     return resp
+
+
+# Notification configuration endpoints
+@router.get("/notifications/config", response_model=NotificationConfig, tags=["notifications"])
+async def notifications_config_get():
+    svc = NotificationService.get_instance()
+    opts = svc.options
+    # Populate only the supported fields; others retain defaults
+    return NotificationConfig(
+        cooldown_seconds=int(opts.cooldown_seconds),
+        ml_bad_prob_threshold=float(getattr(opts, "ml_bad_prob_threshold", 0.6)),
+    )
+
+
+@router.post("/notifications/config", response_model=NotificationConfig, tags=["notifications"])
+async def notifications_config_update(payload: NotificationConfigUpdate):
+    svc = NotificationService.get_instance()
+    if payload.cooldown_seconds is not None:
+        svc.options.cooldown_seconds = max(0, int(payload.cooldown_seconds))
+    if payload.ml_bad_prob_threshold is not None:
+        # Clamp to [0,1]
+        val = float(payload.ml_bad_prob_threshold)
+        if val < 0.0:
+            val = 0.0
+        if val > 1.0:
+            val = 1.0
+        svc.options.ml_bad_prob_threshold = val
+    return await notifications_config_get()
 
 # Feature aggregation management endpoints
 @router.post("/features/aggregate/add", tags=["aggregation"])

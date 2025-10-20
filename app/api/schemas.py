@@ -79,6 +79,12 @@ class NotificationConfig(BaseModel):
     max_shoulder_angle_abs_deg: float = Field(default=7.0, ge=0, description="Max allowed absolute shoulder angle in degrees")
     max_head_tilt_abs_deg: float = Field(default=10.0, ge=0, description="Max allowed absolute head tilt in degrees")
     max_head_drop_ratio: float = Field(default=0.32, ge=0, description="Max allowed head-to-shoulder distance normalized by shoulder width")
+    ml_bad_prob_threshold: float = Field(default=0.6, ge=0.0, le=1.0, description="Threshold on ML bad_posture probability to trigger notification")
+
+
+class NotificationConfigUpdate(BaseModel):
+    cooldown_seconds: Optional[int] = Field(default=None, ge=0, description="Minimum seconds between notifications")
+    ml_bad_prob_threshold: Optional[float] = Field(default=None, ge=0.0, le=1.0, description="Threshold on ML bad_posture probability to trigger notification")
 
 
 class RLAgentState(BaseModel):

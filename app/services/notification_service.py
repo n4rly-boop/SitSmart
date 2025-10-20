@@ -9,7 +9,6 @@ import asyncio
 from typing import Dict, Optional
 
 from app.api.schemas import Notification, NotificationSeverity, ModelAnalysisRequest, ModelAnalysisResponse, FeatureVector
-from app.services.rl_service import RLService
 
 
 @dataclass
@@ -17,6 +16,7 @@ class NotificationOptions:
     cooldown_seconds: int = max(int(os.getenv("FEATURE_BUFFER_SECONDS", "5")), int(os.getenv("NOTIFICATION_COOLDOWN_SECONDS", "5")))
     webhook_url: Optional[str] = None  # Default provided at runtime
     analyze_base_url: Optional[str] = None  # Base URL for model analyze routes
+    ml_bad_prob_threshold: float = float(os.getenv("ML_BAD_PROB_THRESHOLD", "0.6"))
 
 class NotificationService:
     _instance: Optional["NotificationService"] = None
@@ -41,9 +41,7 @@ class NotificationService:
     def _mark_notified(self, now_ms: int) -> None:
         self._last_notified_at_ms = now_ms
 
-    def get_rl_state(self) -> Dict[str, object]:
-        # Proxy RL state to RL service
-        return RLService.get_instance().get_state()
+    # RL is intentionally not exposed here anymore
 
     def build_notification(self, features: Dict[str, float]) -> Notification:
         suggested = "Sit upright, relax shoulders, and keep screen at eye level."
@@ -78,11 +76,8 @@ class NotificationService:
             pass
 
 
-    def decide_and_notify(self, features: Optional[Dict[str, float]], method: str = "rl") -> bool:
-        """Call either RL or future ML service to get decision, then send webhook if allowed by cooldown.
-
-        method: "rl" or "ml"
-        """
+    def decide_and_notify(self, features: Optional[Dict[str, float]]) -> bool:
+        """Query ML for confidence and notify if above threshold and cooldown allows."""
         if not features:
             return False
         try:
@@ -90,28 +85,33 @@ class NotificationService:
         except Exception:
             return False
 
-        if method == "rl":
-            # Enable RL learning when RL method is active
-            RLService.get_instance().set_training_enabled(True)
-            response = RLService.get_instance().analyze(ModelAnalysisRequest(features=fv))
-        else:
-            # Pause RL training while ML drives decisions
-            RLService.get_instance().set_training_enabled(False)
-            # Placeholder ML path with same contract (stub decision false)
-            from app.services.ml_service import MLService
-            response = MLService.get_instance().analyze(
-                ModelAnalysisRequest(features=FeatureVector(**features))
-            )
+        # Always use ML for decision confidence
+        from app.services.ml_service import MLService
+        response = MLService.get_instance().analyze(
+            ModelAnalysisRequest(features=fv)
+        )
 
         if not isinstance(response, ModelAnalysisResponse):
             return False
 
+        return self.maybe_notify_from_ml_response(features, response)
+
+    def maybe_notify_from_ml_response(self, features: Optional[Dict[str, float]], response: ModelAnalysisResponse) -> bool:
+        if not features:
+            return False
         now_ms = int(time.time() * 1000)
-        if not response.should_notify:
+        bad_prob = 0.0
+        try:
+            if response.score is not None:
+                bad_prob = float(response.score)
+            elif response.details and "bad_posture_prob" in (response.details or {}):
+                bad_prob = float((response.details or {}).get("bad_posture_prob", 0.0))  # type: ignore[index]
+        except Exception:
+            bad_prob = 0.0
+        if bad_prob < float(self.options.ml_bad_prob_threshold):
             return False
         if not self._can_notify(now_ms):
             return False
-
         notif = self.build_notification(features)
         self.send_via_webhook(notif)
         self._mark_notified(now_ms)
