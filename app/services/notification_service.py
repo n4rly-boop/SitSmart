@@ -43,7 +43,7 @@ class NotificationService:
 
     # RL is intentionally not exposed here anymore
 
-    def build_notification(self, features: Dict[str, float]) -> Notification:
+    def build_notification(self) -> Notification:
         suggested = "Sit upright, relax shoulders, and keep screen at eye level."
         return Notification(
             title="Posture Check",
@@ -75,26 +75,14 @@ class NotificationService:
         except Exception:
             pass
 
-
-    
-
-    def maybe_notify_from_ml_response(self, features: Optional[Dict[str, float]], response: ModelAnalysisResponse) -> bool:
-        if not features:
-            return False
+    def maybe_notify_from_ml_response(self, response: ModelAnalysisResponse) -> bool:
         now_ms = int(time.time() * 1000)
-        bad_prob = 0.0
-        try:
-            if response.score is not None:
-                bad_prob = float(response.score)
-            elif response.details and "bad_posture_prob" in (response.details or {}):
-                bad_prob = float((response.details or {}).get("bad_posture_prob", 0.0))  # type: ignore[index]
-        except Exception:
-            bad_prob = 0.0
+        bad_prob = response.bad_posture_prob or 0.0
         if bad_prob < float(self.options.ml_bad_prob_threshold):
             return False
         if not self._can_notify(now_ms):
             return False
-        notif = self.build_notification(features)
+        notif = self.build_notification()
         self.send_via_webhook(notif)
         self._mark_notified(now_ms)
         return True

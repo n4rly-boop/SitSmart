@@ -134,11 +134,11 @@ async def decide_from_buffer():
     except Exception:
         mean_features = None
     if not mean_features:
-        return ModelAnalysisResponse(should_notify=False, reason="no-features")
+        return ModelAnalysisResponse(bad_posture_prob=0, reason="no-features")
     # Call ML once, use score for notification decision
     resp = MLService.get_instance().analyze(ModelAnalysisRequest(features=FeatureVector(**mean_features)))
     try:
-        NotificationService.get_instance().maybe_notify_from_ml_response(mean_features, resp)
+        NotificationService.get_instance().maybe_notify_from_ml_response(resp)
     except Exception:
         pass
     return resp

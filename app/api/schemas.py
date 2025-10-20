@@ -40,16 +40,12 @@ class ModelAnalysisRequest(BaseModel):
 class ModelAnalysisResponse(BaseModel):
     """Generic analysis response from ML/RL services used by NotificationService.
 
-    - should_notify: model's decision whether to notify the user
-    - score: optional continuous score for debugging/thresholding
+    - bad_posture_prob: probability of bad posture
     - reason: optional string for traceability
-    - details: optional model-specific metadata
     """
 
-    should_notify: bool
-    score: Optional[float] = None
+    bad_posture_prob: float = None
     reason: Optional[str] = None
-    details: Optional[Dict[str, Any]] = None
 
 class NotificationSeverity(str, Enum):
     info = "info"

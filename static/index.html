@@ -103,6 +103,7 @@
       let lastFeaturePayloadMs = 0;
       let notifyEnabled = false;
       let lastNotificationTs = 0;
+      let lastMlScore = 0; // latest ML bad_posture probability from server (default 0)
 
       function setState(s){ stateEl.textContent = s; stateEl.className = 'status ' + (s || 'unknown'); }
 
@@ -197,7 +198,8 @@
             `head_to_shoulder_distance_ratio: ${fv.head_to_shoulder_distance_ratio.toFixed(3)}`,
             `shoulder_width_px: ${fv.shoulder_width_px.toFixed(1)}`
           ].join('\n');
-          featuresEl.textContent = pretty;
+          // Always include the latest ML score (defaults to 0 until first decision response)
+          featuresEl.textContent = pretty + '\n' + `bad_posture_prob: ${Number(lastMlScore).toFixed(3)}`;
 
           // If notifications are enabled, add to buffer and trigger a decision
           if (notifyEnabled) {
@@ -209,8 +211,18 @@
               });
             } catch {}
             try {
-              await fetch('/api/decide/from_buffer', { method: 'POST' });
-            } catch {}
+              const decideResp = await fetch('/api/decide/from_buffer', { method: 'POST' });
+              let decideData = null;
+              try { decideData = await decideResp.json(); } catch {}
+              if (decideData && typeof decideData.bad_posture_prob === 'number' && isFinite(decideData.bad_posture_prob)){
+                lastMlScore = decideData.bad_posture_prob;
+              }
+              // Re-render features showing the last known ML score (unchanged if not retrieved)
+              featuresEl.textContent = pretty + '\n' + `bad_posture_prob: ${Number(lastMlScore).toFixed(3)}`;
+            } catch {
+              // If request fails, keep lastMlScore unchanged and still display it
+              featuresEl.textContent = pretty + '\n' + `bad_posture_prob: ${Number(lastMlScore).toFixed(3)}`;
+            }
           }
         } catch (e) {
           console.error('[front] sendFeaturesSnapshot failed', e);
