@@ -36,68 +36,84 @@ class EpsilonGreedyAgent:
         return cls._instance
 
     def suggest_threshold(self, current_ml_bad_prob: float) -> float:
-        """Return notification threshold based on full history and epsilon-greedy policy.
+        """Return threshold by maximizing recency- and threshold-smoothed expected delta.
 
-        Goal: find minimal threshold that still keeps delta meaningful for the user.
-        - With probability epsilon: explore by nudging the threshold down or up
-        - Otherwise: exploit using history-derived success statistics
+        We estimate E[delta | threshold=t] via kernel smoothing across historical
+        (delta, threshold) observations with exponential recency decay, then pick
+        the minimal t whose expected delta is within a slack of the best.
         """
         hist = HistoryService.get_instance()
-        meaningful_delta = hist.get_meaningful_delta_threshold()
+        vectors = hist.get_history_vectors()  # (bad_prob, delta, threshold, ts)
 
-        # If we have no notion of what meaningful delta is yet, return current setting
-        if meaningful_delta is None:
+        # If no delta has ever been computed yet, keep current setting
+        has_any_delta = any(delta is not None for _, delta, _, _ in vectors)
+        if not has_any_delta:
             return float(self._current_threshold)
 
-        # Evaluate successes at different thresholds from history
-        vectors = hist.get_history_vectors()  # (bad_prob, delta, threshold, ts)
-        successes_by_threshold: dict[float, int] = {}
-        counts_by_threshold: dict[float, int] = {}
-        for bad_prob, delta, thr, _ in vectors:
-            if delta is None:
-                continue
-            counts_by_threshold[thr] = counts_by_threshold.get(thr, 0) + 1
-            if delta >= meaningful_delta:
-                successes_by_threshold[thr] = successes_by_threshold.get(thr, 0) + 1
+        # Config
+        min_thr = float(self.options.min_threshold)
+        max_thr = float(self.options.max_threshold)
+        grid_step = float(os.getenv("RL_GRID_STEP", "0.05"))
+        bw = float(os.getenv("RL_THRESHOLD_KERNEL_BW", str(max(grid_step, 1e-6))))
+        tau = float(os.getenv("RL_RECENCY_TAU_SEC", "600"))  # seconds
+        prior_weight = float(os.getenv("RL_PRIOR_WEIGHT", "1.0"))
+        slack_frac = float(os.getenv("RL_DELTA_SLACK_FRAC", "0.1"))
+        slack_abs = float(os.getenv("RL_DELTA_SLACK_ABS", "0.0"))
 
-        def success_rate(thr: float) -> float:
-            c = counts_by_threshold.get(thr, 0)
-            if c == 0:
-                return 0.0
-            return float(successes_by_threshold.get(thr, 0)) / float(c)
+        # Candidate thresholds grid (+ include current)
+        candidates: list[float] = []
+        t = min_thr
+        while t <= max_thr + 1e-9:
+            candidates.append(round(t, 4))
+            t += grid_step
+        if self._current_threshold < min_thr or self._current_threshold > max_thr:
+            self._current_threshold = max(min_thr, min(max_thr, float(self._current_threshold)))
+        if all(abs(c - float(self._current_threshold)) > 1e-9 for c in candidates):
+            candidates.append(float(self._current_threshold))
 
-        # Exploit: choose minimal threshold whose success rate is near-best
-        unique_thresholds = sorted(set(counts_by_threshold.keys()))
-        chosen = None
-        if unique_thresholds:
-            best_rate = 0.0
-            for thr in unique_thresholds:
-                r = success_rate(thr)
-                if r > best_rate:
-                    best_rate = r
-            # Allow slack on best rate to favor lower thresholds
-            slack = float(os.getenv("RL_SUCCESS_RATE_SLACK", "0.05"))
-            viable = [thr for thr in unique_thresholds if success_rate(thr) >= (best_rate - slack)]
-            if viable:
-                chosen = min(viable)
+        now_ms = int(time.time() * 1000)
+        # Compute smoothed expected delta for each candidate
+        expected_delta_by_cand: dict[float, float] = {}
+        for cand in candidates:
+            sum_w = float(prior_weight)
+            sum_w_delta = 0.0  # prior mean assumed 0
+            for _, delta, thr, ts in vectors:
+                if delta is None:
+                    continue
+                # Time decay
+                try:
+                    age_s = max(0.0, (now_ms - int(ts)) / 1000.0)
+                except Exception:
+                    age_s = 0.0
+                w_time = 1.0 if tau <= 0.0 else (2.718281828 ** (-age_s / tau))
+                # Threshold proximity kernel (Gaussian)
+                diff = float(thr) - float(cand)
+                w_thr = 1.0 if bw <= 0.0 else (2.718281828 ** (-(diff * diff) / (2.0 * bw * bw)))
+                w = w_time * w_thr
+                sum_w += w
+                sum_w_delta += w * float(delta)
+            expected_delta_by_cand[cand] = (sum_w_delta / sum_w) if sum_w > 0.0 else 0.0
 
-        # Exploration vs Exploitation decision
+        # Choose minimal threshold within slack of the best expected delta
+        best_mean = max(expected_delta_by_cand.values()) if expected_delta_by_cand else 0.0
+        if best_mean <= 0.0:
+            chosen = float(self._current_threshold)
+        else:
+            slack = max(slack_abs, best_mean * slack_frac)
+            viable = [c for c, m in expected_delta_by_cand.items() if m >= (best_mean - slack)]
+            chosen = min(viable) if viable else float(self._current_threshold)
+
+        # Exploration vs exploitation
         do_explore = random.random() < float(self.options.epsilon)
-        if chosen is None:
-            # No data yet – explore around current threshold
-            do_explore = True
-
-        thr = float(chosen) if chosen is not None else float(self._current_threshold)
-        print(f"chosen: {chosen}, current_threshold: {thr}, do_explore: {do_explore}")
-    
+        thr = float(chosen)
         if do_explore:
-            # Move threshold towards minimal boundary to find minimal viable
-            direction = -1 if current_ml_bad_prob >= thr else 1
+            # Nudge towards lower thresholds if we are currently above the score
+            direction = 1 if current_ml_bad_prob >= thr else -1
             step = float(self.options.threshold_step) * float(direction)
             thr = thr + step
 
         # Clamp and store
-        thr = max(self.options.min_threshold, min(self.options.max_threshold, thr))
+        thr = max(min_thr, min(max_thr, thr))
         self._current_threshold = thr
         return float(thr)
 

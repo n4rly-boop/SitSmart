@@ -178,7 +178,13 @@ async def notifications_config_update(payload: NotificationConfigUpdate):
 @router.post("/features/aggregate/add", tags=["aggregation"])
 async def features_aggregate_add(payload: FeatureVector):
     try:
-        _agg.add_features(payload.model_dump())
+        feat = payload.model_dump()
+        _agg.add_features(feat)
+        try:
+            # Update feature ranges immediately with incoming features
+            HistoryService.get_instance().update_feature_ranges(feat)
+        except Exception:
+            pass
     except Exception:
         pass
     # History service will fetch live features via HTTP when needed
@@ -195,6 +201,15 @@ async def get_latest_features():
     except Exception:
         features_only = None
     return {"features": features_only}
+
+
+@router.get("/features/ranges", tags=["analysis"])
+async def get_feature_ranges():
+    try:
+        snapshot = HistoryService.get_instance().get_feature_ranges_snapshot()
+    except Exception:
+        snapshot = {}
+    return {"ranges": snapshot}
 
 
 @router.get("/rl/threshold", tags=["rl"])

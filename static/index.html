@@ -65,6 +65,11 @@
           
         </div>
         <hr />
+        <div style="display:flex;justify-content:space-between;align-items:center;gap:8px;flex-wrap:wrap;">
+          <h3 style="margin:0;">Feature Ranges</h3>
+        </div>
+        <div id="featureRanges" style="font-family:ui-monospace, SFMono-Regular, Menlo, monospace; font-size: 12px; white-space: pre-wrap; background:#f9fafb; border:1px dashed #e5e7eb; padding:8px; border-radius:6px; min-height:60px;"></div>
+        <hr />
         
         <div style="display:flex;justify-content:space-between;align-items:center;gap:8px;">
           <h3 style="margin:0;">Notifications</h3>
@@ -95,6 +100,7 @@
       const fpsInput = document.getElementById('fps');
       const modelEl = document.getElementById('model');
       const featuresEl = document.getElementById('features');
+      const featureRangesEl = document.getElementById('featureRanges');
       const featureEveryInput = document.getElementById('featureEvery');
       const toasts = document.getElementById('toasts');
       const lastNotifiedEl = document.getElementById('lastNotified');
@@ -266,6 +272,36 @@
         lastNotifiedEl.textContent = since.toFixed(1) + 's ago';
       }
 
+      async function refreshFeatureRanges(){
+        try {
+          const r = await fetch('/api/features/ranges');
+          const j = await r.json();
+          const ranges = j && j.ranges ? j.ranges : {};
+          const keys = Object.keys(ranges).sort();
+          if (!keys.length){
+            featureRangesEl.textContent = 'no data yet';
+            return;
+          }
+          const lines = keys.map(k => {
+            const v = ranges[k] || {};
+            if (typeof v.max_abs === 'number' && isFinite(v.max_abs)){
+              return `${k}: max_abs=${v.max_abs.toFixed(2)}`;
+            }
+            const mn = (typeof v.min === 'number' && isFinite(v.min)) ? v.min : null;
+            const mx = (typeof v.max === 'number' && isFinite(v.max)) ? v.max : null;
+            if (mn === null && mx === null){
+              return `${k}: —`;
+            }
+            const mnStr = mn === null ? '—' : mn.toFixed(2);
+            const mxStr = mx === null ? '—' : mx.toFixed(2);
+            return `${k}: [${mnStr}, ${mxStr}]`;
+          });
+          featureRangesEl.textContent = lines.join('\n');
+        } catch {
+          featureRangesEl.textContent = 'error';
+        }
+      }
+
       function loop(){
         const ctx = overlay.getContext('2d');
         const draw = new DrawingUtils(ctx);
@@ -334,6 +370,8 @@
 
       refreshRlPanel();
       setInterval(refreshRlPanel, 2000);
+      refreshFeatureRanges();
+      setInterval(refreshFeatureRanges, 2000);
 
       // Notification helpers
       function showToast(notification){

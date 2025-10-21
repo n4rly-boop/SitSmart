@@ -5,6 +5,7 @@ import json
 import urllib.request
 import threading
 import time
+import math
 from dataclasses import dataclass
 from statistics import median
 from typing import Dict, List, Optional, Tuple
@@ -42,6 +43,9 @@ class HistoryService:
 
         # Concurrency control for histories
         self._lock = threading.RLock()
+
+        # Feature ranges tracker (angles: max |value|, others: min/max)
+        self._feature_ranges = FeatureRanges()
 
     @classmethod
     def get_instance(cls) -> "HistoryService":
@@ -107,6 +111,13 @@ class HistoryService:
         # Fetch f2 (latest sample) from in-process service
         f2 = self._get_f2_features()
 
+        # Update feature ranges based on observed feature snapshots
+        try:
+            self._feature_ranges.update(f1)
+            self._feature_ranges.update(f2)
+        except Exception:
+            pass
+
         # Compute delta outside lock to avoid long holds
         delta_value = self._compute_delta_value(f1, f2)
 
@@ -114,6 +125,18 @@ class HistoryService:
             # Update the stored record
             self._notification_history[record_index].delta = delta_value
             self._notification_history[record_index].f1_features = f1
+
+    # --------------- Feature ranges API ---------------
+    def update_feature_ranges(self, features: Optional[Dict[str, float]]) -> None:
+        """Public helper to update ranges from arbitrary feature snapshots."""
+        try:
+            self._feature_ranges.update(features)
+        except Exception:
+            pass
+
+    def get_feature_ranges_snapshot(self) -> Dict[str, Dict[str, float]]:
+        """Return a copy of current tracked ranges for inspection/export."""
+        return self._feature_ranges.snapshot()
 
     def _compute_delta_value(
         self,
@@ -137,9 +160,11 @@ class HistoryService:
                 v1 = float(features_t1.get(key, 0.0))
                 if abs(v0) <= 1e-12:
                     continue
-                
-                rel = v1 - v0
-                deltas.append(abs(rel))
+                rng = self._feature_ranges.get_max_abs(key)
+                if key.endswith("_deg"):
+                    rng /= 2.0
+                rel = abs(v1 - v0) / rng
+                deltas.append(rel)
             except Exception:
                 continue
         if not deltas:
@@ -185,3 +210,52 @@ class HistoryService:
             return None
 
 
+
+class FeatureRanges:
+    """Tracks per-feature ranges over time.
+
+    - For angle features (keys ending with "_deg"), stores the maximum absolute value observed.
+    - For other features, stores minimal [min, max] that covers all observations so far.
+    """
+
+    def __init__(self) -> None:
+        self._max_abs_rng_by_key: Dict[str, Tuple[float, float]] = {}
+        self._lock = threading.RLock()
+
+    def update(self, features: Optional[Dict[str, list[float]]]) -> None:
+        if not features:
+            return
+        with self._lock:
+            for key, value in features.items():
+                try:
+                    v = value
+                except Exception:
+                    continue
+                if not math.isfinite(v):
+                    continue
+            
+                prev_rng = self._max_abs_rng_by_key.get(key)
+                
+                if prev_rng is None:
+                    self._max_abs_rng_by_key[key] = (v, v)
+                else:
+                    mn, mx = prev_rng
+                    if v < mn:
+                        mn = v
+                    if v > mx:
+                        mx = v
+                    self._max_abs_rng_by_key[key] = (mn, mx)
+
+    def get_max_abs(self, key: str) -> Optional[float]:
+        with self._lock:
+            rng = self._max_abs_rng_by_key.get(key)
+            if rng is None:
+                return 1
+            return rng[1] - rng[0]
+
+    def snapshot(self) -> Dict[str, Dict[str, float]]:
+        with self._lock:
+            out: Dict[str, Dict[str, float]] = {}
+            for k, v in self._max_abs_rng_by_key.items():
+                out[k] = {"max": float(v[1]), "min": float(v[0])}
+            return out
