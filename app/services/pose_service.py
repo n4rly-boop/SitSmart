@@ -16,18 +16,8 @@ class PoseFeatures:
     head_to_shoulder_distance_px: float
     head_to_shoulder_distance_ratio: float
     shoulder_width_px: float
-
-
 class PoseServiceUnavailable(RuntimeError):
     pass
-
-
-@dataclass
-class PoseResult:
-    label: str
-    score: float
-    details: Dict[str, object]
-
 
 class PoseService:
     _instance: Optional["PoseService"] = None

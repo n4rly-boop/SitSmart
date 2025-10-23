@@ -57,30 +57,30 @@
           <label style="font-weight:normal;font-size:12px;display:flex;align-items:center;gap:6px;">
             <input id="notifyEnabled" type="checkbox"> Enable notifications
           </label>
-          <label style="font-weight:normal;font-size:12px;display:flex;align-items:center;gap:6px;">
-            Method
-            <select id="methodSelect" style="height:26px;">
-              <option value="rl" selected>RL</option>
-              <option value="ml">ML</option>
-            </select>
-          </label>
+          <label style="font-weight:normal;font-size:12px;">Cooldown s <input id="cooldownSec" type="number" min="0" max="3600" value="6" style="width:60px"></label>
+          <label style="font-weight:normal;font-size:12px;">ML threshold <input id="mlThreshold" type="number" min="0" max="1" step="0.01" value="0.60" style="width:70px"></label>
+          <button id="saveConfigBtn">Save</button>
         </div>
         <div id="features" style="font-family:ui-monospace, SFMono-Regular, Menlo, monospace; font-size: 13px; white-space: pre-wrap; background:#f9fafb; border:1px dashed #e5e7eb; padding:8px; border-radius:6px; min-height:80px;">
           
         </div>
         <hr />
-        <div style="display:flex;justify-content:space-between;align-items:center;gap:8px;">
-          <h3 style="margin:0;">RL Agent</h3>
-          <div style="display:flex;gap:8px;align-items:center;">
-            <label style="font-weight:normal;font-size:12px;">Auto <input id="rlAuto" type="number" min="0" max="60" value="1" style="width:46px"> s</label>
-            <button id="rlRefreshBtn">Refresh</button>
-          </div>
+        <div style="display:flex;justify-content:space-between;align-items:center;gap:8px;flex-wrap:wrap;">
+          <h3 style="margin:0;">Feature Ranges</h3>
         </div>
-        <div id="rlState" style="font-family:ui-monospace, SFMono-Regular, Menlo, monospace; font-size: 13px; white-space: pre-wrap; background:#f9fafb; border:1px dashed #e5e7eb; padding:8px; border-radius:6px; min-height:80px;"></div>
+        <div id="featureRanges" style="font-family:ui-monospace, SFMono-Regular, Menlo, monospace; font-size: 12px; white-space: pre-wrap; background:#f9fafb; border:1px dashed #e5e7eb; padding:8px; border-radius:6px; min-height:60px;"></div>
         <hr />
+        
         <div style="display:flex;justify-content:space-between;align-items:center;gap:8px;">
           <h3 style="margin:0;">Notifications</h3>
           <div style="font-size:12px;">Last notified: <span id="lastNotified">never</span></div>
+        </div>
+        <div style="display:flex;justify-content:space-between;align-items:center;gap:8px;flex-wrap:wrap;margin-top:8px;">
+          <div>Current threshold: <span id="rlThreshold">—</span></div>
+        </div>
+        <div style="margin-top:10px;">
+          <div style="font-weight:600;margin-bottom:6px;">Last 5 notifications</div>
+          <div id="rlHistory" style="font-family:ui-monospace, SFMono-Regular, Menlo, monospace; font-size: 12px; white-space: pre-wrap; background:#f9fafb; border:1px dashed #e5e7eb; padding:8px; border-radius:6px; min-height:60px;"></div>
         </div>
       </div>
     </div>
@@ -100,23 +100,23 @@
       const fpsInput = document.getElementById('fps');
       const modelEl = document.getElementById('model');
       const featuresEl = document.getElementById('features');
+      const featureRangesEl = document.getElementById('featureRanges');
       const featureEveryInput = document.getElementById('featureEvery');
       const toasts = document.getElementById('toasts');
-      const rlStateEl = document.getElementById('rlState');
-      const rlRefreshBtn = document.getElementById('rlRefreshBtn');
-      const rlAutoInput = document.getElementById('rlAuto');
       const lastNotifiedEl = document.getElementById('lastNotified');
       const notifyEnabledInput = document.getElementById('notifyEnabled');
-      const methodSelect = document.getElementById('methodSelect');
+      const cooldownSecInput = document.getElementById('cooldownSec');
+      const mlThresholdInput = document.getElementById('mlThreshold');
+      const saveConfigBtn = document.getElementById('saveConfigBtn');
 
       let landmarker = null;
       let stream = null;
       let rafId = null;
       let frames = 0;
       let lastFeaturePayloadMs = 0;
-      let rlTimer = null;
       let notifyEnabled = false;
-      let decisionMethod = 'rl';
+      let lastNotificationTs = 0;
+      let lastMlScore = 0; // latest ML bad_posture probability from server (default 0)
 
       function setState(s){ stateEl.textContent = s; stateEl.className = 'status ' + (s || 'unknown'); }
 
@@ -211,7 +211,8 @@
             `head_to_shoulder_distance_ratio: ${fv.head_to_shoulder_distance_ratio.toFixed(3)}`,
             `shoulder_width_px: ${fv.shoulder_width_px.toFixed(1)}`
           ].join('\n');
-          featuresEl.textContent = pretty;
+          // Always include the latest ML score (defaults to 0 until first decision response)
+          featuresEl.textContent = pretty + '\n' + `bad_posture_prob: ${Number(lastMlScore).toFixed(3)}`;
 
           // If notifications are enabled, add to buffer and trigger a decision
           if (notifyEnabled) {
@@ -223,8 +224,18 @@
               });
             } catch {}
             try {
-              await fetch(`/api/decide/from_buffer?method=${encodeURIComponent(decisionMethod)}`, { method: 'POST' });
-            } catch {}
+              const decideResp = await fetch('/api/decide/from_buffer', { method: 'POST' });
+              let decideData = null;
+              try { decideData = await decideResp.json(); } catch {}
+              if (decideData && typeof decideData.bad_posture_prob === 'number' && isFinite(decideData.bad_posture_prob)){
+                lastMlScore = decideData.bad_posture_prob;
+              }
+              // Re-render features showing the last known ML score (unchanged if not retrieved)
+              featuresEl.textContent = pretty + '\n' + `bad_posture_prob: ${Number(lastMlScore).toFixed(3)}`;
+            } catch {
+              // If request fails, keep lastMlScore unchanged and still display it
+              featuresEl.textContent = pretty + '\n' + `bad_posture_prob: ${Number(lastMlScore).toFixed(3)}`;
+            }
           }
         } catch (e) {
           console.error('[front] sendFeaturesSnapshot failed', e);
@@ -232,55 +243,63 @@
         }
       }
 
-      async function fetchRLState(){
+      async function loadNotificationConfig(){
         try {
-          const resp = await fetch('/api/rl/state');
+          const resp = await fetch('/api/notifications/config');
           const data = await resp.json();
-          if (!resp.ok) throw new Error(data && data.detail ? data.detail : ('HTTP ' + resp.status));
-          renderRLState(data);
-        } catch (e) {
-          rlStateEl.textContent = 'RL state error: ' + e;
-        }
+          if (!resp.ok) return;
+          const cd = Number(data.cooldown_seconds ?? 5);
+          const th = Number(data.ml_bad_prob_threshold ?? 0.6);
+          cooldownSecInput.value = String(cd);
+          mlThresholdInput.value = th.toFixed(2);
+        } catch {}
       }
 
-      function renderRLState(s){
-        if (!s || s.error){ rlStateEl.textContent = 'Unavailable'; return; }
-        const nowMs = Date.now();
-        const lastMs = Number(s.last_notified_at_ms || 0);
-        const since = lastMs ? Math.max(0, (nowMs - lastMs) / 1000) : null;
-        // Update separate notifications section
-        lastNotifiedEl.textContent = lastMs ? (since.toFixed(1) + 's ago') : 'never';
-        const w0 = (s.weights && s.weights.action_0) ? s.weights.action_0 : [];
-        const w1 = (s.weights && s.weights.action_1) ? s.weights.action_1 : [];
-        const w0s = w0.slice(0, 6).map(v => Number(v).toFixed(3)).join(', ');
-        const w1s = w1.slice(0, 6).map(v => Number(v).toFixed(3)).join(', ');
-        const cfg = s.config || {};
-        const r = s.rewards || {};
-        const rsum = r.sum || {}; const rcount = r.count || {}; const rlast = r.last || {};
-        const a0sum = Number(rsum['0'] || 0).toFixed(2); const a1sum = Number(rsum['1'] || 0).toFixed(2);
-        const a0cnt = Number(rcount['0'] || 0); const a1cnt = Number(rcount['1'] || 0);
-        const a0last = rlast['0'] === null || rlast['0'] === undefined ? '—' : Number(rlast['0']).toFixed(2);
-        const a1last = rlast['1'] === null || rlast['1'] === undefined ? '—' : Number(rlast['1']).toFixed(2);
-        const lines = [
-          `epsilon: ${Number(s.epsilon || 0).toFixed(4)}`,
-          `total_updates: ${Number(s.total_updates || 0)}`,
-          `cooldown_seconds: ${Number(s.cooldown_seconds || 0)}`,
-          '',
-          'per-action rewards:',
-          `  a=0 sum=${a0sum} count=${a0cnt} last=${a0last}`,
-          `  a=1 sum=${a1sum} count=${a1cnt} last=${a1last}`,
-          '',
-          'weights:',
-          `  action_0 [${w0.length}]: [ ${w0s}${w0.length > 6 ? ', …' : ''} ]`,
-          `  action_1 [${w1.length}]: [ ${w1s}${w1.length > 6 ? ', …' : ''} ]`,
-          '',
-          'config:',
-          `  epsilon_start=${cfg.epsilon_start}, min=${cfg.epsilon_min}, decay=${cfg.epsilon_decay}`,
-          `  learning_rate=${cfg.learning_rate}, reward_window_seconds=${cfg.reward_window_seconds}`,
-          `  decision_interval_seconds=${cfg.decision_interval_seconds}`,
-          `  improvement_ratio_threshold=${cfg.improvement_ratio_threshold}`
-        ];
-        rlStateEl.textContent = lines.join('\n');
+      async function saveNotificationConfig(){
+        const payload = {};
+        const cd = Math.max(0, Math.min(3600, parseInt(cooldownSecInput.value || '0', 10)));
+        const th = Math.max(0, Math.min(1, parseFloat(mlThresholdInput.value || '0.6')));
+        if (!Number.isNaN(cd)) payload.cooldown_seconds = cd;
+        if (!Number.isNaN(th)) payload.ml_bad_prob_threshold = th;
+        try {
+          await fetch('/api/notifications/config', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(payload) });
+        } catch {}
+      }
+
+      function updateLastNotified(){
+        if (!lastNotificationTs) { lastNotifiedEl.textContent = 'never'; return; }
+        const since = Math.max(0, (Date.now() - lastNotificationTs) / 1000);
+        lastNotifiedEl.textContent = since.toFixed(1) + 's ago';
+      }
+
+      async function refreshFeatureRanges(){
+        try {
+          const r = await fetch('/api/features/ranges');
+          const j = await r.json();
+          const ranges = j && j.ranges ? j.ranges : {};
+          const keys = Object.keys(ranges).sort();
+          if (!keys.length){
+            featureRangesEl.textContent = 'no data yet';
+            return;
+          }
+          const lines = keys.map(k => {
+            const v = ranges[k] || {};
+            if (typeof v.max_abs === 'number' && isFinite(v.max_abs)){
+              return `${k}: max_abs=${v.max_abs.toFixed(2)}`;
+            }
+            const mn = (typeof v.min === 'number' && isFinite(v.min)) ? v.min : null;
+            const mx = (typeof v.max === 'number' && isFinite(v.max)) ? v.max : null;
+            if (mn === null && mx === null){
+              return `${k}: —`;
+            }
+            const mnStr = mn === null ? '—' : mn.toFixed(2);
+            const mxStr = mx === null ? '—' : mx.toFixed(2);
+            return `${k}: [${mnStr}, ${mxStr}]`;
+          });
+          featureRangesEl.textContent = lines.join('\n');
+        } catch {
+          featureRangesEl.textContent = 'error';
+        }
       }
 
       function loop(){
@@ -316,19 +335,43 @@
 
       startBtn.addEventListener('click', start);
       stopBtn.addEventListener('click', stop);
-      rlRefreshBtn.addEventListener('click', fetchRLState);
       notifyEnabledInput.addEventListener('change', () => { notifyEnabled = !!notifyEnabledInput.checked; });
-      methodSelect.addEventListener('change', () => { decisionMethod = String(methodSelect.value || 'rl'); });
+      saveConfigBtn.addEventListener('click', saveNotificationConfig);
       // initialize defaults
       notifyEnabled = !!notifyEnabledInput.checked;
-      decisionMethod = String(methodSelect.value || 'rl');
-      rlAutoInput.addEventListener('change', () => {
-        const sec = Math.max(0, Math.min(60, parseInt(rlAutoInput.value || '0', 10)));
-        if (rlTimer) { clearInterval(rlTimer); rlTimer = null; }
-        if (sec > 0) rlTimer = setInterval(fetchRLState, sec * 1000);
-      });
-      // start polling by default
-      (function initRL(){ try { fetchRLState(); } catch {} rlAutoInput.dispatchEvent(new Event('change')); })();
+      loadNotificationConfig();
+      setInterval(updateLastNotified, 1000);
+
+      async function refreshRlPanel(){
+        // Threshold
+        try {
+          const r = await fetch('/api/rl/threshold');
+          const j = await r.json();
+          const thr = Number(j && j.threshold);
+          const el = document.getElementById('rlThreshold');
+          el.textContent = Number.isFinite(thr) ? thr.toFixed(2) : '—';
+        } catch {}
+        // History
+        try {
+          const r = await fetch('/api/rl/history');
+          const j = await r.json();
+          const list = (j && Array.isArray(j.history)) ? j.history : [];
+          const html = list.map((e) => {
+            const ts = e && e.timestamp_ms ? new Date(e.timestamp_ms).toLocaleTimeString() : '';
+            const bp = (e && typeof e.bad_posture_prob === 'number' && isFinite(e.bad_posture_prob)) ? e.bad_posture_prob.toFixed(2) : '—';
+            const dt = (e && typeof e.delta === 'number' && isFinite(e.delta)) ? e.delta.toFixed(3) : '—';
+            const th = (e && typeof e.threshold === 'number' && isFinite(e.threshold)) ? e.threshold.toFixed(2) : '—';
+            return `<div>t=${ts}  prob=${bp}  delta=${dt}  thr=${th}</div>`;
+          }).join('');
+          const el = document.getElementById('rlHistory');
+          el.innerHTML = html || '<div>no history</div>';
+        } catch {}
+      }
+
+      refreshRlPanel();
+      setInterval(refreshRlPanel, 2000);
+      refreshFeatureRanges();
+      setInterval(refreshFeatureRanges, 2000);
 
       // Notification helpers
       function showToast(notification){
@@ -377,11 +420,15 @@
                     if (last && last.title && last.message){
                       console.log('[front] Fetch last notification', last);
                       showToast(last);
+                      try { lastNotificationTs = Date.parse(last.timestamp) || Date.now(); } catch { lastNotificationTs = Date.now(); }
+                      updateLastNotified();
                     }
                   }).catch(() => {});
                 } else if (data && data.title && data.message){
                   console.log('[front] WS notification', data);
                   showToast(data);
+                  try { lastNotificationTs = Date.parse(data.timestamp) || Date.now(); } catch { lastNotificationTs = Date.now(); }
+                  updateLastNotified();
                 }
               } catch {}
             };

@@ -71,4 +71,11 @@ class FeatureBuffer:
                 out[k] = 0.0
         return out
 
-
+    def last(self) -> Optional[Dict[str, float]]:
+        """Return the most recent raw feature sample if available."""
+        if not self._buf:
+            return None
+        try:
+            return self._buf[-1][1]
+        except Exception:
+            return None

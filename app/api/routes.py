@@ -2,18 +2,19 @@ from fastapi import APIRouter, UploadFile, File, HTTPException, WebSocket
 from fastapi.responses import JSONResponse
 from starlette.websockets import WebSocketDisconnect
 
-from app.api.schemas import FeatureExtractionResponse, Notification, NotificationSeverity, RLAgentState, ModelAnalysisRequest, ModelAnalysisResponse, FeatureVector
+from app.api.schemas import FeatureExtractionResponse, Notification, NotificationSeverity, ModelAnalysisRequest, ModelAnalysisResponse, FeatureVector, NotificationConfig, NotificationConfigUpdate
+from app.services.history_service import HistoryService
 from app.services.pose_service import PoseService, PoseServiceUnavailable
 from app.services.notification_service import NotificationService
-from app.services.feature_buffer import FeatureBuffer
-from app.services.rl_service import RLService
+from app.services.rl_service import EpsilonGreedyAgent
+from app.services.feature_aggregate_service import FeatureAggregateService
 from app.services.ml_service import MLService
 
 router = APIRouter()
 
 _notification_ws_clients = set()
 _last_notification: Notification | None = None
-_buffer = FeatureBuffer()
+_agg = FeatureAggregateService.get_instance()
 
 
 @router.get("/health", tags=["system"])
@@ -117,17 +118,7 @@ async def notifications_last():
     return _last_notification
 
 
-@router.get("/rl/state", response_model=RLAgentState, tags=["rl"])
-async def rl_state():
-    # delegate to RL service
-    return RLAgentState.model_validate(RLService.get_instance().get_state())
-
-
-# RL analyze route (same contract as future ML analyze route)
-@router.post("/rl/analyze", response_model=ModelAnalysisResponse, tags=["rl"])
-async def rl_analyze(payload: ModelAnalysisRequest):
-    resp = RLService.get_instance().analyze(payload)
-    return resp
+# RL endpoints intentionally removed from main flow
 
 
 # Future ML analyze stub with the same contract
@@ -137,51 +128,138 @@ async def ml_analyze(payload: ModelAnalysisRequest):
     return resp
 
 
-# Decide using the server buffer (mean over window), then notify
+# Decide using the server buffer (mean over window) via ML, then notify if above threshold
 @router.post("/decide/from_buffer", response_model=ModelAnalysisResponse, tags=["decision"])
-async def decide_from_buffer(method: str = "rl"):
+async def decide_from_buffer():
     try:
-        mean_features = _buffer.mean()
+        mean_features = _agg.mean_features()
     except Exception:
         mean_features = None
     if not mean_features:
-        return ModelAnalysisResponse(should_notify=False, reason="no-features")
-    # Toggle RL training according to method
+        return ModelAnalysisResponse(bad_posture_prob=0, reason="no-features")
+    # Call ML once, use score for notification decision
+    resp = MLService.get_instance().analyze(ModelAnalysisRequest(features=FeatureVector(**mean_features)))
     try:
-        from app.services.rl_service import RLService as _RS
-        _RS.get_instance().set_training_enabled(method == "rl")
+        # Pass f1 (mean_features) to history via notification service
+        NotificationService.get_instance().maybe_notify_from_ml_response(resp, f1_features=mean_features)
     except Exception:
         pass
-    NotificationService.get_instance().decide_and_notify(mean_features, method=method)
-    # Also return model decision for clients who call this endpoint
-    if method == "rl":
-        resp = RLService.get_instance().analyze(ModelAnalysisRequest(features=FeatureVector(**mean_features)))
-    else:
-        resp = MLService.get_instance().analyze(
-            ModelAnalysisRequest(features=FeatureVector(**mean_features))
-        )
     return resp
+
+
+# Notification configuration endpoints
+@router.get("/notifications/config", response_model=NotificationConfig, tags=["notifications"])
+async def notifications_config_get():
+    svc = NotificationService.get_instance()
+    opts = svc.options
+    # Populate only the supported fields; others retain defaults
+    return NotificationConfig(
+        cooldown_seconds=int(opts.cooldown_seconds),
+        ml_bad_prob_threshold=float(getattr(opts, "ml_bad_prob_threshold", 0.6)),
+    )
+
+
+@router.post("/notifications/config", response_model=NotificationConfig, tags=["notifications"])
+async def notifications_config_update(payload: NotificationConfigUpdate):
+    svc = NotificationService.get_instance()
+    if payload.cooldown_seconds is not None:
+        svc.options.cooldown_seconds = max(0, int(payload.cooldown_seconds))
+    if payload.ml_bad_prob_threshold is not None:
+        # Clamp to [0,1]
+        val = float(payload.ml_bad_prob_threshold)
+        if val < 0.0:
+            val = 0.0
+        if val > 1.0:
+            val = 1.0
+        svc.options.ml_bad_prob_threshold = val
+    return await notifications_config_get()
 
 # Feature aggregation management endpoints
 @router.post("/features/aggregate/add", tags=["aggregation"])
 async def features_aggregate_add(payload: FeatureVector):
     try:
-        _buffer.add(payload.model_dump())
+        feat = payload.model_dump()
+        _agg.add_features(feat)
+        try:
+            # Update feature ranges immediately with incoming features
+            HistoryService.get_instance().update_feature_ranges(feat)
+        except Exception:
+            pass
     except Exception:
         pass
+    # History service will fetch live features via HTTP when needed
     return {"ok": True}
+
+
+@router.get("/features", tags=["analysis"])
+async def get_latest_features():
+    # Provide the latest mean-less, single-sample features that were last added to the buffer
+    # We approximate latest by returning the current buffer mean to keep a simple server-side contract
+    # but the HistoryService will call this endpoint after delta_range seconds to sample f2.
+    try:
+        features_only = _agg.last_features()
+    except Exception:
+        features_only = None
+    return {"features": features_only}
+
+
+@router.get("/features/ranges", tags=["analysis"])
+async def get_feature_ranges():
+    try:
+        snapshot = HistoryService.get_instance().get_feature_ranges_snapshot()
+    except Exception:
+        snapshot = {}
+    return {"ranges": snapshot}
+
+
+@router.get("/rl/threshold", tags=["rl"])
+async def rl_threshold():
+    try:
+        thr = EpsilonGreedyAgent.get_instance().get_current_threshold()
+    except Exception:
+        try:
+            thr = float(NotificationService.get_instance().options.ml_bad_prob_threshold)
+        except Exception:
+            thr = 0.6
+    return {"threshold": float(thr)}
+
+
+@router.get("/rl/history", tags=["rl"])
+async def rl_history():
+    hist = HistoryService.get_instance().get_notification_history()
+    # Take last 5 entries, most recent first
+    last5 = list(hist[-5:])[::-1]
+    data = []
+    for r in last5:
+        try:
+            data.append({
+                "bad_posture_prob": float(r.bad_posture_prob),
+                "delta": None if r.delta is None else float(r.delta),
+                "threshold": float(r.threshold),
+                "timestamp_ms": int(r.timestamp_ms),
+            })
+        except Exception:
+            continue
+    return {"history": data}
+
+
+@router.post("/rl/threshold/decide", tags=["rl"])
+async def rl_threshold_decide(payload: dict):
+    try:
+        bad_prob = float(payload.get("bad_posture_prob", 0.0))
+    except Exception:
+        bad_prob = 0.0
+    thr = EpsilonGreedyAgent.get_instance().suggest_threshold(bad_prob)
+    return {"threshold": float(thr)}
 
 
 @router.get("/features/aggregate/mean", tags=["aggregation"])
 async def features_aggregate_mean():
-    mean = _buffer.mean()
+    mean = _agg.mean_features()
     return {"features": mean}
 
 
 @router.post("/features/aggregate/clear", tags=["aggregation"])
 async def features_aggregate_clear():
-    from app.services.feature_buffer import FeatureBuffer as _FB
-    # reinitialize buffer to clear it
-    global _buffer
-    _buffer = _FB(window_seconds=_buffer.window_seconds)
+    _agg.clear()
     return {"ok": True}

@@ -1,4 +1,5 @@
 from fastapi import FastAPI
+import logging
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.staticfiles import StaticFiles
 from pathlib import Path
@@ -30,3 +31,28 @@ async def root():
 
 
 # Uvicorn entrypoint: `uvicorn app.main:app --reload`
+
+# Suppress access logs for noisy endpoints
+class _SuppressLog(logging.Filter):
+    def filter(self, record: logging.LogRecord) -> bool:  # noqa: D401
+        """Return False for suppressed access log lines to drop them."""
+        try:
+            line = getattr(record, "request_line", "")
+            if not line:
+                # Fallback to formatted message preview
+                line = record.getMessage()
+        except Exception:
+            line = ""
+        suppressed_lines = [
+            "/api/features",
+            "/api/decide/from_buffer",
+            "/api/rl/threshold",
+            "/api/rl/history",
+        ]
+        return not any(l in line for l in suppressed_lines)
+
+
+try:
+    logging.getLogger("uvicorn.access").addFilter(_SuppressLog())
+except Exception:
+    pass

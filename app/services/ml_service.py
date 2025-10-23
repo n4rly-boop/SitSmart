@@ -44,22 +44,12 @@ class MLService:
 
         X_scaled = self.scaler.transform(feature_vector)
 
-        prediction = self.model.predict(X_scaled)[0]
-
         probabilities = self.model.predict_proba(X_scaled)
         good_prob = float(probabilities[0][0])
         bad_prob = float(probabilities[0][1])
-
-        should_notify = bool(prediction == 1)
+        
+        assert good_prob + bad_prob == 1.0
 
         return ModelAnalysisResponse(
-            should_notify=should_notify,
-            score=bad_prob,
-            reason=f"ml-classifier (class={prediction})",
-            details={
-                "predicted_class": int(prediction),
-                "class_label": "bad_posture" if prediction == 1 else "good_posture",
-                "good_posture_prob": good_prob,
-                "bad_posture_prob": bad_prob
-            }
+            bad_posture_prob=bad_prob
         )

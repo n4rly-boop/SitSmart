@@ -8,15 +8,17 @@ from dataclasses import dataclass
 import asyncio
 from typing import Dict, Optional
 
-from app.api.schemas import Notification, NotificationSeverity, ModelAnalysisRequest, ModelAnalysisResponse, FeatureVector
-from app.services.rl_service import RLService
+from app.api.schemas import Notification, NotificationSeverity, ModelAnalysisResponse
+from app.services.rl_service import EpsilonGreedyAgent
+from app.services.history_service import HistoryService
 
 
 @dataclass
 class NotificationOptions:
-    cooldown_seconds: int = int(os.getenv("FEATURE_BUFFER_SECONDS", "5")) 
+    cooldown_seconds: int = max(int(os.getenv("FEATURE_BUFFER_SECONDS", "5")), int(os.getenv("NOTIFICATION_COOLDOWN_SECONDS", "5")))
     webhook_url: Optional[str] = None  # Default provided at runtime
     analyze_base_url: Optional[str] = None  # Base URL for model analyze routes
+    ml_bad_prob_threshold: float = float(os.getenv("ML_BAD_PROB_THRESHOLD", "0.6"))
 
 class NotificationService:
     _instance: Optional["NotificationService"] = None
@@ -41,11 +43,9 @@ class NotificationService:
     def _mark_notified(self, now_ms: int) -> None:
         self._last_notified_at_ms = now_ms
 
-    def get_rl_state(self) -> Dict[str, object]:
-        # Proxy RL state to RL service
-        return RLService.get_instance().get_state()
+    # RL is intentionally not exposed here anymore
 
-    def build_notification(self, features: Dict[str, float]) -> Notification:
+    def build_notification(self) -> Notification:
         suggested = "Sit upright, relax shoulders, and keep screen at eye level."
         return Notification(
             title="Posture Check",
@@ -77,42 +77,25 @@ class NotificationService:
         except Exception:
             pass
 
-
-    def decide_and_notify(self, features: Optional[Dict[str, float]], method: str = "rl") -> bool:
-        """Call either RL or future ML service to get decision, then send webhook if allowed by cooldown.
-
-        method: "rl" or "ml"
-        """
-        if not features:
-            return False
-        try:
-            fv = FeatureVector(**features)  # type: ignore[arg-type]
-        except Exception:
-            return False
-
-        if method == "rl":
-            # Enable RL learning when RL method is active
-            RLService.get_instance().set_training_enabled(True)
-            response = RLService.get_instance().analyze(ModelAnalysisRequest(features=fv))
-        else:
-            # Pause RL training while ML drives decisions
-            RLService.get_instance().set_training_enabled(False)
-            # Placeholder ML path with same contract (stub decision false)
-            from app.services.ml_service import MLService
-            response = MLService.get_instance().analyze(
-                ModelAnalysisRequest(features=FeatureVector(**features))
-            )
-
-        if not isinstance(response, ModelAnalysisResponse):
-            return False
-
+    def maybe_notify_from_ml_response(self, response: ModelAnalysisResponse, f1_features: Optional[Dict[str, float]] = None) -> bool:
         now_ms = int(time.time() * 1000)
-        if not response.should_notify:
+        bad_prob = response.bad_posture_prob or 0.0
+        rl_threshold = float(self.options.ml_bad_prob_threshold)
+        try:
+            rl_threshold = EpsilonGreedyAgent.get_instance().suggest_threshold(bad_prob)
+        except Exception:
+            rl_threshold = float(self.options.ml_bad_prob_threshold)
+
+        if bad_prob < float(rl_threshold):
             return False
         if not self._can_notify(now_ms):
             return False
-
-        notif = self.build_notification(features)
+        notif = self.build_notification()
         self.send_via_webhook(notif)
         self._mark_notified(now_ms)
+        # Record notification for RL history (delta computed asynchronously)
+        try:
+            HistoryService.get_instance().on_notification(bad_prob, rl_threshold, now_ms, f1_features=f1_features)
+        except Exception:
+            pass
         return True
