@@ -1,0 +1,2 @@
+best_params,best_cv_recall,test_recall_good_posture,test_recall_bad_posture,test_precision_good_posture,test_precision_bad_posture,test_f1_good_posture,test_f1_bad_posture,roc_auc_bad_posture,test_accuracy
+"{'C': 1, 'class_weight': 'balanced', 'solver': 'sag'}",0.7366071428571428,0.631578947368421,0.7288135593220338,0.6923076923076923,0.671875,0.6605504587155964,0.6991869918699187,0.7282188522152839,0.6810344827586207
