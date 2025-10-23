@@ -8,3 +8,5 @@ __pycache__/
 .DS_Store
 parsing/.venv
 /parsing/captured_images/images
+/parsing/total_images
+.history
