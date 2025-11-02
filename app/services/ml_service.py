@@ -45,10 +45,10 @@ class MLService:
         X_scaled = self.scaler.transform(feature_vector)
 
         probabilities = self.model.predict_proba(X_scaled)
-        good_prob = float(probabilities[0][0])
-        bad_prob = float(probabilities[0][1])
-        
-        assert good_prob + bad_prob == 1.0
+
+        bad_prob = float(probabilities[0][0])
+        good_prob = float(probabilities[0][1])
+        assert abs(good_prob + bad_prob - 1.0) < 1e-9
 
         return ModelAnalysisResponse(
             bad_posture_prob=bad_prob
