@@ -6,7 +6,7 @@ from app.api.schemas import FeatureExtractionResponse, Notification, Notificatio
 from app.services.history_service import HistoryService
 from app.services.pose_service import PoseService, PoseServiceUnavailable
 from app.services.notification_service import NotificationService
-from app.services.rl_service import EpsilonGreedyAgent
+from app.services.rl_service import ThresholdLinUCBAgent
 from app.services.feature_aggregate_service import FeatureAggregateService
 from app.services.ml_service import MLService
 
@@ -215,7 +215,7 @@ async def get_feature_ranges():
 @router.get("/rl/threshold", tags=["rl"])
 async def rl_threshold():
     try:
-        thr = EpsilonGreedyAgent.get_instance().get_current_threshold()
+        thr = ThresholdLinUCBAgent.get_instance().get_last_decision_threshold()
     except Exception:
         try:
             thr = float(NotificationService.get_instance().options.ml_bad_prob_threshold)
@@ -249,8 +249,12 @@ async def rl_threshold_decide(payload: dict):
         bad_prob = float(payload.get("bad_posture_prob", 0.0))
     except Exception:
         bad_prob = 0.0
-    thr = EpsilonGreedyAgent.get_instance().suggest_threshold(bad_prob)
-    return {"threshold": float(thr)}
+    agent = ThresholdLinUCBAgent.get_instance()
+    try:
+        threshold = agent.estimate_threshold(bad_prob)
+    except Exception:
+        threshold = agent.get_current_threshold()
+    return {"threshold": float(threshold)}
 
 
 @router.get("/features/aggregate/mean", tags=["aggregation"])

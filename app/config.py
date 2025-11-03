@@ -37,7 +37,7 @@ class AppConfig:
     feature_buffer_seconds: int = _get_int("FEATURE_BUFFER_SECONDS", 5)
 
     # Notification cooldown in seconds
-    notification_cooldown_seconds: int = _get_int("NOTIFICATION_COOLDOWN_SECONDS", 5)
+    notification_cooldown_seconds: int = _get_int("NOTIFICATION_COOLDOWN_SECONDS", 8)
 
     # ML probability threshold to trigger notification
     ml_bad_prob_threshold: float = _get_float("ML_BAD_PROB_THRESHOLD", 0.6)

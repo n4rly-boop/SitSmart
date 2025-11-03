@@ -1,268 +1,265 @@
 from __future__ import annotations
 
-import math
 import os
 import time
 from collections import deque
 from dataclasses import dataclass
-from typing import Deque, Dict, List, Optional
+from typing import Deque, Dict, Optional
+
+import numpy as np
 
 from app.services.history_service import HistoryService
 
 
 @dataclass
-class ThresholdBanditConfig:
-    """Configuration for the contextual bandit that tunes the notification threshold."""
+class LinUCBConfig:
+    """Hyper-parameters for the threshold LinUCB agent."""
 
-    theta_grid: Optional[List[float]] = None
-    ucb_beta: float = float(os.getenv("RL_UCB_BETA", "0.7"))
-    min_valid_delta: float = float(os.getenv("RL_MIN_VALID_DELTA", "0.02"))
-    cooldown_seconds: float = float(os.getenv("NOTIFICATION_COOLDOWN_SECONDS", "60.0"))
-    pending_alert_timeout_seconds: float = float(os.getenv("RL_PENDING_ALERT_TIMEOUT_SECONDS", "30.0"))
+    alpha: float = float(os.getenv("RL_ALPHA", 0.7))
+    eta: float = float(os.getenv("RL_THRESHOLD_STEP", 0.03))
+    lambda_reg: float = float(os.getenv("RL_LAMBDA_REG", 1e-3))
+    tau_min: float = float(os.getenv("RL_TAU_MIN", 0.5))
+    tau_max: float = float(os.getenv("RL_TAU_MAX", 0.95))
+    gamma: float = float(os.getenv("RL_FORGETTING_GAMMA", 0.99))
+    penalty_notification: float = float(os.getenv("RL_PENALTY_NOTIF", 0.05))
+    penalty_frequency: float = float(os.getenv("RL_PENALTY_FREQUENCY", 0.1))
+    default_time_since_last: float = float(os.getenv("RL_DEFAULT_TIME_SINCE_LAST", 30.0))
+    max_time_since_last: float = float(os.getenv("RL_MAX_TIME_SINCE_LAST", 600.0))
+    reward_clip_min: float = -1.0
+    reward_clip_max: float = 1.0
+    initial_threshold: float = float(os.getenv("ML_BAD_PROB_THRESHOLD", 0.6))
 
-    def build_grid(self) -> List[float]:
-        """Construct θ-grid; defaults to [0.55, 0.60, ..., 0.90]."""
-        if self.theta_grid:
-            return [float(round(th, 4)) for th in self.theta_grid]
-        min_thr = float(os.getenv("RL_MIN_THRESHOLD", "0.55"))
-        max_thr = float(os.getenv("RL_MAX_THRESHOLD", "0.9"))
-        step = float(os.getenv("RL_GRID_STEP", "0.05"))
-        grid: List[float] = []
-        current = min_thr
-        while current <= max_thr + 1e-9:
-            grid.append(round(current, 4))
-            current += step
-        if not grid:
-            grid = [round(min_thr, 4)]
-        return grid
+    def actions(self) -> tuple[float, float, float]:
+        step = abs(float(self.eta))
+        return (-step, 0.0, step)
 
 
 @dataclass
-class DecisionRecord:
-    """Bookkeeping for a single notification experiment."""
-
+class DecisionState:
     tick_id: int
-    theta: float
-    decision_ms: int
+    timestamp_ms: int
     bad_prob: float
+    time_since_last: float
+    context: np.ndarray
+    action: float
+    threshold_after: float
+    notify: bool
     history_index: Optional[int] = None
-    reward_applied: bool = False
 
 
-class ThresholdBanditAgent:
-    """Contextual bandit that tunes the ML bad-posture threshold using UCB1."""
-
-    def __init__(self, config: Optional[ThresholdBanditConfig] = None) -> None:
-        self.config = config or ThresholdBanditConfig()
-        self.theta_grid = self.config.build_grid()
-        self.count: Dict[float, int] = {th: 0 for th in self.theta_grid}
-        self.sum_reward: Dict[float, float] = {th: 0.0 for th in self.theta_grid}
-        self.mean_reward: Dict[float, float] = {th: 0.0 for th in self.theta_grid}
-        self.total_steps: int = 1
-        self._next_tick_id: int = 0
-        self._current_theta: float = self.theta_grid[0]
-
-        # Pending bookkeeping
-        self._awaiting_alert: Deque[DecisionRecord] = deque()
-        self._decisions_by_tick: Dict[int, DecisionRecord] = {}
-        self._decisions_by_history: Dict[int, DecisionRecord] = {}
-        self._history_index: int = 0
-        self._last_notification_ms: int = -10_000_000_000
-
-        self._pending_alert_timeout_ms: int = int(
-            max(0.0, self.config.pending_alert_timeout_seconds) * 1000
-        )
-        self._cooldown_ms: int = int(max(0.0, self.config.cooldown_seconds) * 1000)
-        self.min_valid_delta: float = float(self.config.min_valid_delta)
-
-    def step(self, p_t: float, now_seconds: Optional[float] = None) -> Dict[str, float]:
-        """Consume one ML tick. Threshold updates only when a notification fires."""
-        now = time.time() if now_seconds is None else now_seconds
-        now_ms = int(now * 1000)
-        self._process_history(now)
-
-        bad_prob = float(max(0.0, min(1.0, p_t)))
-        can_alert = (now_ms - self._last_notification_ms) >= self._cooldown_ms
-
-        if not can_alert:
-            return {
-                "tick_id": -1.0,
-                "theta": float(self._current_theta),
-                "alert": 0.0,
-            }
-
-        theta = self._select_theta(bad_prob)
-        if theta is None:
-            return {
-                "tick_id": -1.0,
-                "theta": float(self._current_theta),
-                "alert": 0.0,
-            }
-
-        self._current_theta = theta
-        tick_id = self._next_tick_id
-        self._next_tick_id += 1
-        self.count[theta] += 1
-        self.total_steps += 1
-        self._last_notification_ms = now_ms
-
-        decision = DecisionRecord(
-            tick_id=tick_id,
-            theta=theta,
-            decision_ms=now_ms,
-            bad_prob=bad_prob,
-        )
-        self._awaiting_alert.append(decision)
-        self._decisions_by_tick[tick_id] = decision
-
-        return {"tick_id": float(tick_id), "theta": float(theta), "alert": 1.0}
-
-    def suggest_threshold(self, p_t: float) -> float:
-        """Public API: pick θ given current bad posture probability."""
-        return float(self.step(p_t)["theta"])
-
-    def observe_delta(self, tick_id: int, delta: Optional[float]) -> None:
-        """Optional manual reward hook for tests/simulations."""
-        decision = self._decisions_by_tick.get(int(tick_id))
-        if decision is None or decision.reward_applied:
-            return
-        reward = self._safe_reward(delta)
-        if reward is None:
-            reward = 0.0
-        self._apply_reward(decision, reward)
-
-    def diagnostics(self) -> Dict[str, object]:
-        ranked = sorted(
-            [(th, self.mean_reward[th], self.count[th]) for th in self.theta_grid],
-            key=lambda x: x[1],
-            reverse=True,
-        )
-        return {
-            "total_steps": int(self.total_steps - 1),
-            "last_notification_ms": int(self._last_notification_ms),
-            "pending_alerts": len(self._awaiting_alert),
-            "top_thresholds": ranked[:3],
-        }
-
-    def get_current_threshold(self) -> float:
-        return float(self._current_theta)
-
-    # ----- Internals -----
-
-    def _select_theta(self, bad_prob: float) -> Optional[float]:
-        eligible = [th for th in self.theta_grid if th <= bad_prob + 1e-9]
-        if not eligible:
-            return None
-        for th in eligible:
-            if self.count[th] == 0:
-                return th
-        t = max(self.total_steps, 2)
-        best_theta = self.theta_grid[0]
-        best_score = float("-inf")
-        log_term = math.log(float(t))
-        for th in eligible:
-            n = self.count[th]
-            mean = self.mean_reward[th]
-            bonus = self.config.ucb_beta * math.sqrt(log_term / float(n))
-            score = mean + bonus
-            if score > best_score:
-                best_score = score
-                best_theta = th
-        return best_theta
-
-    def _process_history(self, now_seconds: float) -> None:
-        now_ms = int(now_seconds * 1000)
-        timeout_ms = self._pending_alert_timeout_ms
-        try:
-            history = HistoryService.get_instance().get_notification_history()
-        except Exception:
-            history = []
-
-        if timeout_ms > 0:
-            while self._awaiting_alert:
-                pending = self._awaiting_alert[0]
-                if (now_ms - pending.decision_ms) <= timeout_ms:
-                    break
-                self._awaiting_alert.popleft()
-                pending.reward_applied = True
-                self._decisions_by_tick.pop(pending.tick_id, None)
-
-        while self._history_index < len(history):
-            record = history[self._history_index]
-            try:
-                ts_ms = int(record.timestamp_ms)
-            except Exception:
-                ts_ms = now_ms
-            self._last_notification_ms = max(self._last_notification_ms, ts_ms)
-            if self._awaiting_alert:
-                decision = self._awaiting_alert.popleft()
-                decision.history_index = self._history_index
-                self._decisions_by_history[self._history_index] = decision
-            self._history_index += 1
-
-        for idx in list(self._decisions_by_history.keys()):
-            if idx >= len(history):
-                continue
-            decision = self._decisions_by_history[idx]
-            if decision.reward_applied:
-                self._decisions_by_history.pop(idx, None)
-                continue
-            record = history[idx]
-            reward = self._safe_reward(getattr(record, "delta", None))
-            if reward is None:
-                continue
-            self._apply_reward(decision, reward)
-            self._decisions_by_history.pop(idx, None)
-
-    def _safe_reward(self, delta: Optional[float]) -> Optional[float]:
-        if delta is None:
-            return None
-        try:
-            val = float(delta)
-        except (TypeError, ValueError):
-            return 0.0
-        if val < 0.0 or val > 1.0:
-            return 0.0
-        if val < self.min_valid_delta:
-            return 0.0
-        return val
-
-    def _apply_reward(self, decision: DecisionRecord, reward: float) -> None:
-        theta = decision.theta
-        self.sum_reward[theta] += reward
-        self.mean_reward[theta] = self.sum_reward[theta] / max(self.count[theta], 1)
-        decision.reward_applied = True
-        self._decisions_by_tick.pop(decision.tick_id, None)
-        try:
-            self._awaiting_alert.remove(decision)
-        except ValueError:
-            pass
-
-
-class EpsilonGreedyAgent(ThresholdBanditAgent):
-    """Backward-compatible name retained for the API surface."""
-
-    _instance: Optional["EpsilonGreedyAgent"] = None
+@dataclass
+class _ModelState:
+    A: np.ndarray
+    A_inv: np.ndarray
+    b: np.ndarray
 
     @classmethod
-    def get_instance(cls) -> "EpsilonGreedyAgent":
+    def create(cls, dim: int, regularization: float) -> "_ModelState":
+        A = np.eye(dim, dtype=np.float64) * float(regularization)
+        return cls(A=A, A_inv=np.linalg.inv(A), b=np.zeros(dim, dtype=np.float64))
+
+    def theta(self) -> np.ndarray:
+        return self.A_inv @ self.b
+
+
+class ThresholdLinUCBAgent:
+    """Online LinUCB agent that adapts the global notification threshold."""
+
+    _instance: Optional["ThresholdLinUCBAgent"] = None
+
+    def __init__(self, config: Optional[LinUCBConfig] = None) -> None:
+        self._config = config or LinUCBConfig()
+        self._dim = 6  # Context: [1, bad_prob, tsl, bad_prob^2, tsl^2, cross]
+        self._actions = self._config.actions()
+        self._models: Dict[float, _ModelState] = {
+            action: _ModelState.create(self._dim, self._config.lambda_reg) for action in self._actions
+        }
+
+        thr = float(self._config.initial_threshold)
+        self._current_threshold: float = float(self._clip(thr))
+        self._tick: int = 0
+        self._history_seen: int = 0
+        self._last_notification_ms: Optional[int] = None
+        self._last_reward: Optional[float] = None
+        self._last_decision_threshold: float = self._current_threshold
+
+        self._staged: Dict[int, DecisionState] = {}
+        self._pending: Deque[DecisionState] = deque()
+        self._awaiting_delta: Dict[int, DecisionState] = {}
+
+    # ------------------------------------------------------------------ #
+    # Public API
+    # ------------------------------------------------------------------ #
+
+    @classmethod
+    def get_instance(cls) -> "ThresholdLinUCBAgent":
         if cls._instance is None:
             cls._instance = cls()
         return cls._instance
 
+    def decide(self, bad_prob: float, now_seconds: Optional[float] = None) -> Dict[str, float | bool | int | None]:
+        """Run the LinUCB policy once and stage the outcome."""
+        now_ms = self._now_ms(now_seconds)
+        self._refresh_history()
 
-if __name__ == "__main__":
-    # Minimal demonstration run with synthetic deltas
-    import random
+        prob = float(np.clip(bad_prob, 0.0, 1.0))
+        tsl = self._time_since_last(now_ms)
+        context = self._build_context(prob, tsl)
+        action = self._select_action(context)
 
-    agent = ThresholdBanditAgent()
-    now = time.time()
-    for _ in range(200):
-        p = random.random()
-        step = agent.step(p, now)
-        if step["alert"] > 0.5:
-            # Sample delta proportional to probability, clip to [0,1]
-            delta = max(0.0, min(1.0, p + random.uniform(-0.1, 0.1)))
-            agent.observe_delta(int(step["tick_id"]), delta)
-        now += 2.0
-    print("Diagnostics:", agent.diagnostics())
+        new_threshold = self._clip(self._current_threshold + action)
+        notify = prob >= new_threshold
+
+        tick_id = self._tick
+        self._tick += 1
+        decision = DecisionState(
+            tick_id=tick_id,
+            timestamp_ms=now_ms,
+            bad_prob=prob,
+            time_since_last=tsl,
+            context=context,
+            action=action,
+            threshold_after=new_threshold,
+            notify=notify,
+        )
+        self._staged[tick_id] = decision
+        self._current_threshold = new_threshold
+        self._last_decision_threshold = new_threshold
+
+        return {
+            "tick_id": tick_id,
+            "notify": notify,
+            "new_threshold": float(new_threshold),
+            "chosen_action": float(action),
+            "last_reward": None if self._last_reward is None else float(self._last_reward),
+        }
+
+    def commit_decision(self, tick_id: int, *, sent: bool, timestamp_ms: Optional[int] = None) -> None:
+        """Finalize a staged decision once the notification pipeline acts."""
+        decision = self._staged.pop(int(tick_id), None)
+        if decision is None or not sent:
+            return
+        if timestamp_ms is not None:
+            decision.timestamp_ms = int(timestamp_ms)
+        self._last_notification_ms = decision.timestamp_ms
+        self._pending.append(decision)
+        self._refresh_history()
+
+    def estimate_threshold(self, bad_prob: float, now_seconds: Optional[float] = None) -> float:
+        """Return the next threshold adjustment without mutating state."""
+        now_ms = self._now_ms(now_seconds)
+        self._refresh_history()
+        prob = float(np.clip(bad_prob, 0.0, 1.0))
+        tsl = self._time_since_last(now_ms)
+        context = self._build_context(prob, tsl)
+        action = self._select_action(context)
+        return float(self._clip(self._current_threshold + action))
+
+    def get_current_threshold(self) -> float:
+        return float(self._current_threshold)
+
+    def get_last_decision_threshold(self) -> float:
+        return float(self._last_decision_threshold)
+
+    # ------------------------------------------------------------------ #
+    # Internals
+    # ------------------------------------------------------------------ #
+
+    def _now_ms(self, now_seconds: Optional[float]) -> int:
+        now = time.time() if now_seconds is None else float(now_seconds)
+        return int(now * 1000)
+
+    def _time_since_last(self, now_ms: int) -> float:
+        if self._last_notification_ms is None:
+            return float(self._config.default_time_since_last)
+        elapsed = max(0.0, (now_ms - self._last_notification_ms) / 1000.0)
+        return float(min(elapsed, self._config.max_time_since_last))
+
+    def _build_context(self, bad_prob: float, tsl: float) -> np.ndarray:
+        return np.array(
+            [1.0, bad_prob, tsl, bad_prob**2, tsl**2, bad_prob * tsl],
+            dtype=np.float64,
+        )
+
+    def _select_action(self, context: np.ndarray) -> float:
+        best_score = float("-inf")
+        best_action = 0.0
+        for action in self._actions:
+            model = self._models[action]
+            theta = model.theta()
+            pred = float(context @ theta)
+            var = float(context @ (model.A_inv @ context))
+            var = max(var, 0.0)
+            score = pred + self._config.alpha * var**0.5
+            if score > best_score:
+                best_score = score
+                best_action = action
+        return float(best_action)
+
+    def _clip(self, value: float) -> float:
+        return float(max(self._config.tau_min, min(self._config.tau_max, value)))
+
+    def _refresh_history(self) -> None:
+        try:
+            history = HistoryService.get_instance().get_notification_history()
+        except Exception:
+            return
+
+        if self._history_seen == 0 and history:
+            try:
+                self._last_notification_ms = int(history[-1].timestamp_ms)
+            except Exception:
+                pass
+
+        # Assign new history entries to pending decisions
+        while self._history_seen < len(history):
+            record = history[self._history_seen]
+            if self._pending:
+                decision = self._pending.popleft()
+                decision.history_index = self._history_seen
+                self._awaiting_delta[self._history_seen] = decision
+            try:
+                self._last_notification_ms = int(record.timestamp_ms)
+            except Exception:
+                pass
+            self._history_seen += 1
+
+        # Apply rewards where delta is ready
+        for idx, decision in list(self._awaiting_delta.items()):
+            if idx >= len(history):
+                continue
+            record = history[idx]
+            delta = getattr(record, "delta", None)
+            if delta is None:
+                continue
+            reward = self._compute_reward(decision, delta)
+            self._update_model(decision, reward)
+            self._last_reward = reward
+            self._awaiting_delta.pop(idx, None)
+
+    def _compute_reward(self, decision: DecisionState, delta_value: float) -> float:
+        delta_val = max(float(delta_value or 0.0), 0.0)
+        penalty_notif = self._config.penalty_notification
+        penalty_freq = self._config.penalty_frequency / max(decision.time_since_last, 1e-3)
+        reward = delta_val - penalty_notif - penalty_freq
+        return float(
+            max(self._config.reward_clip_min, min(self._config.reward_clip_max, reward))
+        )
+
+    def _update_model(self, decision: DecisionState, reward: float) -> None:
+        action = decision.action
+        model = self._models[action]
+        gamma = float(self._config.gamma)
+
+        if 0.0 < gamma < 1.0:
+            model.A = gamma * model.A + (1.0 - gamma) * np.eye(self._dim, dtype=np.float64)
+            model.b = gamma * model.b
+
+        model.A = model.A + np.outer(decision.context, decision.context)
+        model.b = model.b + reward * decision.context
+        try:
+            model.A_inv = np.linalg.inv(model.A)
+        except np.linalg.LinAlgError:
+            model.A_inv = np.linalg.pinv(model.A)
+        self._models[action] = model
+
