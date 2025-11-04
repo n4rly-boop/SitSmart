@@ -1,9 +1,0 @@
-__pycache__/
-
-.env
-.venv
-.pytest_cache/
-.vscode/
-.idea/
-.DS_Store
-parsing/.venv

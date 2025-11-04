@@ -1,4 +1,4 @@
-from __future__ import annotations
+
 
 import json
 import os
@@ -9,16 +9,20 @@ import asyncio
 from typing import Dict, Optional
 
 from app.api.schemas import Notification, NotificationSeverity, ModelAnalysisResponse
-from app.services.rl_service import EpsilonGreedyAgent
+from app.config import get_config
+from app.services.rl_service import ThresholdLinUCBAgent
 from app.services.history_service import HistoryService
+
+
+_CONFIG = get_config()
 
 
 @dataclass
 class NotificationOptions:
-    cooldown_seconds: int = max(int(os.getenv("FEATURE_BUFFER_SECONDS", "5")), int(os.getenv("NOTIFICATION_COOLDOWN_SECONDS", "5")))
+    cooldown_seconds: int = int(_CONFIG.effective_cooldown_seconds)
     webhook_url: Optional[str] = None  # Default provided at runtime
     analyze_base_url: Optional[str] = None  # Base URL for model analyze routes
-    ml_bad_prob_threshold: float = float(os.getenv("ML_BAD_PROB_THRESHOLD", "0.6"))
+    ml_bad_prob_threshold: float = float(_CONFIG.ml_bad_prob_threshold)
 
 class NotificationService:
     _instance: Optional["NotificationService"] = None
@@ -79,21 +83,41 @@ class NotificationService:
 
     def maybe_notify_from_ml_response(self, response: ModelAnalysisResponse, f1_features: Optional[Dict[str, float]] = None) -> bool:
         now_ms = int(time.time() * 1000)
-        bad_prob = response.bad_posture_prob or 0.0
-        rl_threshold = float(self.options.ml_bad_prob_threshold)
-        try:
-            rl_threshold = EpsilonGreedyAgent.get_instance().suggest_threshold(bad_prob)
-        except Exception:
-            rl_threshold = float(self.options.ml_bad_prob_threshold)
+        bad_prob = float(response.bad_posture_prob or 0.0)
 
-        if bad_prob < float(rl_threshold):
+        agent = ThresholdLinUCBAgent.get_instance()
+        try:
+            decision = agent.decide(bad_prob, now_seconds=now_ms / 1000.0)
+        except Exception:
+            # RL unavailable – use static policy
+            threshold = float(self.options.ml_bad_prob_threshold)
+            should_notify = bad_prob >= threshold and self._can_notify(now_ms)
+            if not should_notify:
+                return False
+            notif = self.build_notification()
+            self.send_via_webhook(notif)
+            self._mark_notified(now_ms)
+            try:
+                HistoryService.get_instance().on_notification(bad_prob, threshold, now_ms, f1_features=f1_features)
+            except Exception:
+                pass
+            return True
+
+        rl_threshold = float(decision["new_threshold"])
+        should_notify = bool(decision["notify"]) and self._can_notify(now_ms)
+
+        try:
+            agent.commit_decision(decision["tick_id"], sent=should_notify, timestamp_ms=now_ms)
+        except Exception:
+            should_notify = False
+
+        if not should_notify:
             return False
-        if not self._can_notify(now_ms):
-            return False
+
         notif = self.build_notification()
         self.send_via_webhook(notif)
         self._mark_notified(now_ms)
-        # Record notification for RL history (delta computed asynchronously)
+
         try:
             HistoryService.get_instance().on_notification(bad_prob, rl_threshold, now_ms, f1_features=f1_features)
         except Exception:

@@ -1,4 +1,4 @@
-from __future__ import annotations
+
 
 import os
 import json
@@ -44,8 +44,6 @@ class HistoryService:
         # Concurrency control for histories
         self._lock = threading.RLock()
 
-        # Feature ranges tracker (angles: max |value|, others: min/max)
-        self._feature_ranges = FeatureRanges()
 
     @classmethod
     def get_instance(cls) -> "HistoryService":
@@ -111,13 +109,6 @@ class HistoryService:
         # Fetch f2 (latest sample) from in-process service
         f2 = self._get_f2_features()
 
-        # Update feature ranges based on observed feature snapshots
-        try:
-            self._feature_ranges.update(f1)
-            self._feature_ranges.update(f2)
-        except Exception:
-            pass
-
         # Compute delta outside lock to avoid long holds
         delta_value = self._compute_delta_value(f1, f2)
 
@@ -126,17 +117,10 @@ class HistoryService:
             self._notification_history[record_index].delta = delta_value
             self._notification_history[record_index].f1_features = f1
 
-    # --------------- Feature ranges API ---------------
-    def update_feature_ranges(self, features: Optional[Dict[str, float]]) -> None:
-        """Public helper to update ranges from arbitrary feature snapshots."""
-        try:
-            self._feature_ranges.update(features)
-        except Exception:
-            pass
-
-    def get_feature_ranges_snapshot(self) -> Dict[str, Dict[str, float]]:
-        """Return a copy of current tracked ranges for inspection/export."""
-        return self._feature_ranges.snapshot()
+    # --------------- History maintenance ---------------
+    def clear_history(self) -> None:
+        with self._lock:
+            self._notification_history.clear()
 
     def _compute_delta_value(
         self,
@@ -160,7 +144,14 @@ class HistoryService:
                 v1 = float(features_t1.get(key, 0.0))
                 if abs(v0) <= 1e-12:
                     continue
-                rng = self._feature_ranges.get_max_abs(key)
+                # Use CalibrationService ranges for normalization; fallback to 1
+                try:
+                    from app.services.calibration_service import CalibrationService
+                    rng = CalibrationService.get_instance().get_range_width(key)
+                except Exception:
+                    rng = None
+                if not rng or rng <= 0:
+                    rng = 1.0
                 if key.endswith("_deg"):
                     rng /= 2.0
                 rel = abs(v1 - v0) / rng
@@ -169,9 +160,12 @@ class HistoryService:
                 continue
         if not deltas:
             return None
-        # Mean of absolute normalized differences
-        return float(sum(deltas) / float(len(deltas)))
+        # Root mean of absolute normalized differences
+        return self._delta_to_scalar(deltas)
 
+    def _delta_to_scalar(self, delta: List[float]) -> float:
+        bias = 0.1
+        return float(math.sqrt(max((sum(delta) - bias),0) / max((float(len(delta) - bias),1))))
     # --------------- Accessors ---------------
     def get_notification_history(self) -> List[NotificationRecord]:
         with self._lock:
@@ -208,54 +202,3 @@ class HistoryService:
             return float(sorted_vals[lo] * (1.0 - frac) + sorted_vals[hi] * frac)
         except Exception:
             return None
-
-
-
-class FeatureRanges:
-    """Tracks per-feature ranges over time.
-
-    - For angle features (keys ending with "_deg"), stores the maximum absolute value observed.
-    - For other features, stores minimal [min, max] that covers all observations so far.
-    """
-
-    def __init__(self) -> None:
-        self._max_abs_rng_by_key: Dict[str, Tuple[float, float]] = {}
-        self._lock = threading.RLock()
-
-    def update(self, features: Optional[Dict[str, list[float]]]) -> None:
-        if not features:
-            return
-        with self._lock:
-            for key, value in features.items():
-                try:
-                    v = value
-                except Exception:
-                    continue
-                if not math.isfinite(v):
-                    continue
-            
-                prev_rng = self._max_abs_rng_by_key.get(key)
-                
-                if prev_rng is None:
-                    self._max_abs_rng_by_key[key] = (v, v)
-                else:
-                    mn, mx = prev_rng
-                    if v < mn:
-                        mn = v
-                    if v > mx:
-                        mx = v
-                    self._max_abs_rng_by_key[key] = (mn, mx)
-
-    def get_max_abs(self, key: str) -> Optional[float]:
-        with self._lock:
-            rng = self._max_abs_rng_by_key.get(key)
-            if rng is None:
-                return 1
-            return rng[1] - rng[0]
-
-    def snapshot(self) -> Dict[str, Dict[str, float]]:
-        with self._lock:
-            out: Dict[str, Dict[str, float]] = {}
-            for k, v in self._max_abs_rng_by_key.items():
-                out[k] = {"max": float(v[1]), "min": float(v[0])}
-            return out
