@@ -1,4 +1,4 @@
-from __future__ import annotations
+
 
 import os
 import json
@@ -169,8 +169,8 @@ class HistoryService:
                 continue
         if not deltas:
             return None
-        # Mean of absolute normalized differences
-        return float(sum(deltas) / float(len(deltas)))
+        # Root mean of absolute normalized differences
+        return float(math.sqrt(sum(deltas) / float(len(deltas))))
 
     # --------------- Accessors ---------------
     def get_notification_history(self) -> List[NotificationRecord]:
