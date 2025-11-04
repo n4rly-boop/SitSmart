@@ -13,20 +13,23 @@ from app.services.history_service import HistoryService
 class LinUCBConfig:
     """Hyper-parameters for the threshold LinUCB agent."""
 
-    alpha: float = float(os.getenv("RL_ALPHA", 0.3)) # exploration-exploitation trade-off
     eta: float = float(os.getenv("RL_THRESHOLD_STEP", 0.03)) # threshold step size
     lambda_reg: float = float(os.getenv("RL_LAMBDA_REG", 1e-3)) # regularization parameter
     tau_min: float = float(os.getenv("RL_TAU_MIN", 0.5)) # minimum threshold
     tau_max: float = float(os.getenv("RL_TAU_MAX", 0.95)) # maximum threshold
     gamma: float = float(os.getenv("RL_FORGETTING_GAMMA", 1.0)) # forgetting factor
     penalty_notification: float = float(os.getenv("RL_PENALTY_NOTIF", 0.05)) # penalty for notification
-    penalty_frequency: float = float(os.getenv("RL_PENALTY_FREQUENCY", 0.1)) # penalty for frequency
     reward_clip_min: float = -1.0 # minimum reward
     reward_clip_max: float = 1.0 # maximum reward
     initial_threshold: float = float(os.getenv("ML_BAD_PROB_THRESHOLD", 0.6)) # initial threshold
-    # Mild inertia/guardrails
-    switch_margin: float = float(os.getenv("RL_SWITCH_MARGIN", 0.02)) # min score gain to switch
-    switch_cost: float = float(os.getenv("RL_SWITCH_COST", 0.01)) # penalty for non-zero/flip actions
+    # Thompson Sampling noise scale
+    ts_sigma: float = float(os.getenv("RL_TS_SIGMA", 0.05))
+    # Small cost to changing threshold to discourage jitter
+    change_cost: float = float(os.getenv("RL_CHANGE_COST", 0.002))
+    # EWMA step for delta baseline (per-user)
+    delta_baseline_beta: float = float(os.getenv("RL_DELTA_BASELINE_BETA", 0.1))
+    # EWMA step for delta baseline (per-user)
+    delta_baseline_beta: float = float(os.getenv("RL_DELTA_BASELINE_BETA", 0.1))
 
     def actions(self) -> tuple[float, float, float]:
         step = abs(float(self.eta))
@@ -68,13 +71,12 @@ class ThresholdLinUCBAgent:
     def __init__(self, config: Optional[LinUCBConfig] = None) -> None:
         self._config = config or LinUCBConfig()
         # Base context features (without action):
-        self._base_dim = 6  # [1, bad_prob, bad_prob^2, thr, thr^2, bad_prob-thr]
+        # [1, bad_prob, bad_prob^2, thr, thr^2, bad_prob-thr, mu]
+        self._base_dim = 7
         self._actions = self._config.actions()
         # Joint model over (base_context, action, action^2, base_context * action)
         self._joint_dim = 2 * self._base_dim + 2
         self._model: _ModelState = _ModelState.create(self._joint_dim, self._config.lambda_reg)
-        # Per-action usage counters for annealing exploration
-        self._action_counts: Dict[float, int] = {a: 0 for a in self._actions}
 
         thr = float(self._config.initial_threshold)
         self._current_threshold: float = float(self._clip(thr))
@@ -87,6 +89,8 @@ class ThresholdLinUCBAgent:
         self._pending: Deque[DecisionState] = deque()
         self._awaiting_delta: Dict[int, DecisionState] = {}
         self._last_applied_action: float = 0.0
+        self._delta_baseline: Optional[float] = None
+        self._delta_baseline: Optional[float] = None
 
     # ------------------------------------------------------------------ #
     # Public API
@@ -165,19 +169,21 @@ class ThresholdLinUCBAgent:
         now = time.time() if now_seconds is None else float(now_seconds)
         return int(now * 1000)
 
+    def _build_base_context(self, bad_prob: float, thr: float, mu: float) -> np.ndarray:
+        return np.array([
+            1.0,
+            bad_prob,
+            bad_prob**2,
+            thr,
+            thr**2,
+            bad_prob - thr,
+            mu,
+        ], dtype=np.float64)
+
     def _build_context(self, bad_prob: float) -> np.ndarray:
         thr = float(self._current_threshold)
-        return np.array(
-            [
-                1.0,
-                bad_prob,
-                bad_prob**2,
-                thr,
-                thr**2,
-                bad_prob - thr,
-            ],
-            dtype=np.float64,
-        )
+        mu = float(self._delta_baseline if self._delta_baseline is not None else 0.1)
+        return self._build_base_context(bad_prob, thr, mu)
 
     def _build_joint_context(self, base_context: np.ndarray, action: float) -> np.ndarray:
         a = float(action)
@@ -188,39 +194,24 @@ class ThresholdLinUCBAgent:
         ])
 
     def _select_action(self, base_context: np.ndarray) -> float:
+        # Thompson Sampling: sample theta ~ N(θ̂, σ² A_inv)
         theta = self._model.theta()
-        action_scores: Dict[float, float] = {}
+        cov = float(self._config.ts_sigma) ** 2 * self._model.A_inv
+        # Ensure numerical stability of covariance
+        try:
+            theta_sample = np.random.multivariate_normal(theta, cov)
+        except Exception:
+            jitter = 1e-8
+            theta_sample = np.random.multivariate_normal(theta, cov + jitter * np.eye(len(theta)))
+
+        best_action = 0.0
+        best_score = float("-inf")
         for action in self._actions:
             joint_ctx = self._build_joint_context(base_context, action)
-            pred = float(joint_ctx @ theta)
-            var = float(joint_ctx @ (self._model.A_inv @ joint_ctx))
-            var = max(var, 0.0)
-            # Anneal exploration by action usage count
-            alpha_eff = float(self._config.alpha) / (self._action_counts.get(action, 0) + 1) ** 0.5
-            score = pred + alpha_eff * var**0.5
-            # Mild inertia: penalize non-zero actions and direction flips slightly
-            if action != 0.0:
-                score -= float(self._config.switch_cost)
-                if self._last_applied_action != 0.0 and np.sign(action) != np.sign(self._last_applied_action):
-                    score -= float(self._config.switch_cost)
-            action_scores[action] = score
-
-        # Choose best by score
-        best_action = max(self._actions, key=lambda a: action_scores[a])
-        best_score = action_scores[best_action]
-
-        # Hysteresis: prefer staying (0.0) unless clear advantage over no-change
-        zero_score = action_scores.get(0.0, float("-inf"))
-        if best_action != 0.0 and (best_score - zero_score) < float(self._config.switch_margin):
-            return 0.0
-
-        # Hysteresis: avoid flipping unless clearly better than current direction
-        cur = float(self._last_applied_action)
-        if cur != 0.0 and np.sign(best_action) != np.sign(cur):
-            cur_score = action_scores.get(cur, -1e18)
-            if (best_score - cur_score) < float(self._config.switch_margin):
-                return cur
-
+            score = float(joint_ctx @ theta_sample)
+            if score > best_score:
+                best_score = score
+                best_action = action
         return float(best_action)
 
     def _clip(self, value: float) -> float:
@@ -248,14 +239,18 @@ class ThresholdLinUCBAgent:
             delta = getattr(record, "delta", None)
             if delta is None:
                 continue
+            # Rebuild base context at decision time using stored bad_prob, threshold, and current mu
+            mu_val = float(self._delta_baseline if self._delta_baseline is not None else 0.1)
+            base_ctx = self._build_base_context(float(decision.bad_prob), float(decision.threshold_after), mu_val)
+
             reward = self._compute_reward(decision, delta)
-            self._update_model(decision, reward)
+            self._update_model_with(base_ctx, float(decision.action), reward)
             self._last_reward = reward
             self._awaiting_delta.pop(idx, None)
 
             # After applying reward, adapt the threshold now (post-delta)
             try:
-                next_action = self._select_action(decision.context)
+                next_action = self._select_action(base_ctx)
                 new_thr = self._clip(self._current_threshold + next_action)
                 self._current_threshold = new_thr
                 self._last_decision_threshold = new_thr
@@ -264,34 +259,39 @@ class ThresholdLinUCBAgent:
                 # If anything goes wrong, keep current threshold unchanged
                 pass
 
+            # Update EWMA delta baseline after using it for reward
+            try:
+                beta = float(self._config.delta_baseline_beta)
+                d = float(delta if delta is not None else 0.0)
+                if self._delta_baseline is None:
+                    self._delta_baseline = d
+                else:
+                    self._delta_baseline = (1.0 - beta) * float(self._delta_baseline) + beta * d
+                if self._delta_baseline < 0.0:
+                    self._delta_baseline = 0.0
+                if self._delta_baseline > 1.0:
+                    self._delta_baseline = 1.0
+            except Exception:
+                pass
+
     def _compute_reward(self, decision: DecisionState, delta_value: float) -> float:
         delta_val = max(float(delta_value or 0.0), 0.0)
-        # Use user-specific meaningful delta as a baseline; if unavailable, fall back
-        try:
-            meaningful = HistoryService.get_instance().get_meaningful_delta_threshold()
-        except Exception:
-            meaningful = None
-        if meaningful is None:
-            meaningful = 0.1
-
-        # Positive signal when delta is low (we want to move threshold up)
-        signal = float(meaningful) - float(delta_val)
+        mu = float(self._delta_baseline if self._delta_baseline is not None else 0.1)
+        # Directional reward: sign(a)*(mu - delta)
         action_sign = 0.0 if decision.action == 0.0 else (1.0 if decision.action > 0.0 else -1.0)
-
-        shaped = signal * action_sign
-
-        penalty_notif = self._config.penalty_notification
-        penalty_freq = self._config.penalty_frequency
-        reward = shaped - penalty_notif - penalty_freq
+        directional = (mu - delta_val) * action_sign
+        # Small penalties
+        penalty_notif = float(self._config.penalty_notification)
+        change_penalty = float(self._config.change_cost) if decision.action != 0.0 else 0.0
+        reward = directional - penalty_notif - change_penalty
         return float(
             max(self._config.reward_clip_min, min(self._config.reward_clip_max, reward))
         )
 
-    def _update_model(self, decision: DecisionState, reward: float) -> None:
-        action = decision.action
+    def _update_model_with(self, base_context: np.ndarray, action: float, reward: float) -> None:
         gamma = float(self._config.gamma)
 
-        joint_ctx = self._build_joint_context(decision.context, action)
+        joint_ctx = self._build_joint_context(base_context, action)
 
         if 0.0 < gamma < 1.0:
             self._model.A = gamma * self._model.A + (1.0 - gamma) * np.eye(self._joint_dim, dtype=np.float64)
@@ -303,8 +303,3 @@ class ThresholdLinUCBAgent:
             self._model.A_inv = np.linalg.inv(self._model.A)
         except np.linalg.LinAlgError:
             self._model.A_inv = np.linalg.pinv(self._model.A)
-        # Count usage for annealing
-        try:
-            self._action_counts[action] = int(self._action_counts.get(action, 0)) + 1
-        except Exception:
-            pass

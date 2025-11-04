@@ -161,8 +161,11 @@ class HistoryService:
         if not deltas:
             return None
         # Root mean of absolute normalized differences
-        return float(math.sqrt(sum(deltas) / float(len(deltas))))
+        return self._delta_to_scalar(deltas)
 
+    def _delta_to_scalar(self, delta: List[float]) -> float:
+        bias = 0.1
+        return float(math.sqrt(max((sum(delta) - bias),0) / max((float(len(delta) - bias),1))))
     # --------------- Accessors ---------------
     def get_notification_history(self) -> List[NotificationRecord]:
         with self._lock:
