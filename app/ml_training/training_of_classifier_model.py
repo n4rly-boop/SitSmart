@@ -31,6 +31,12 @@ print(data.head())
 print(data.isnull().sum())
 
 data = data.dropna()
+
+angle_cols = ['shoulder_line_angle_deg', 'head_tilt_deg']
+data[angle_cols] = data[angle_cols].abs()
+y = data["label"]
+X = data.drop(["image_name", "label"], axis=1).values
+
 print(f"\nThe size of the data after deleting the NaN: {data.shape}")
 
 print("\nClass distribution:")

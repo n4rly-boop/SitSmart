@@ -36,14 +36,14 @@ class MLService:
 
     def analyze(self, request: ModelAnalysisRequest) -> ModelAnalysisResponse:
         features_dict = request.features.model_dump()
+        ANGLE_KEYS = {'shoulder_line_angle_deg', 'head_tilt_deg'}
 
         feature_vector = np.array([
-            features_dict.get(key, 0.0)
+            (abs(features_dict.get(key, 0.0)) if key in ANGLE_KEYS else features_dict.get(key, 0.0))
             for key in self.FEATURE_ORDER
         ]).reshape(1, -1)
 
         X_scaled = self.scaler.transform(feature_vector)
-
         probabilities = self.model.predict_proba(X_scaled)
 
         bad_prob = float(probabilities[0][0])
