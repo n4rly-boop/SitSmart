@@ -81,6 +81,9 @@
         <div style="display:flex;justify-content:space-between;align-items:center;gap:8px;flex-wrap:wrap;margin-top:8px;">
           <div>Current threshold: <span id="rlThreshold">—</span></div>
         </div>
+        <div style="display:flex;justify-content:space-between;align-items:center;gap:8px;flex-wrap:wrap;margin-top:8px;">
+          <div>Current mean delta: <span id="rlDeltaBaseline">—</span></div>
+        </div>
         <div style="margin-top:10px;">
           <div style="font-weight:600;margin-bottom:6px;">Last 5 notifications</div>
           <div id="rlHistory" style="font-family:ui-monospace, SFMono-Regular, Menlo, monospace; font-size: 12px; white-space: pre-wrap; background:#f9fafb; border:1px dashed #e5e7eb; padding:8px; border-radius:6px; min-height:60px;"></div>
@@ -387,6 +390,14 @@
           const thr = Number(j && j.threshold);
           const el = document.getElementById('rlThreshold');
           el.textContent = Number.isFinite(thr) ? thr.toFixed(2) : '—';
+        } catch {}
+        // Delta baseline
+        try {
+          const r = await fetch('/api/rl/delta_baseline');
+          const j = await r.json();
+          const deltaBaseline = j && j.delta_baseline !== null ? Number(j.delta_baseline) : null;
+          const el = document.getElementById('rlDeltaBaseline');
+          el.textContent = (deltaBaseline !== null && Number.isFinite(deltaBaseline)) ? deltaBaseline.toFixed(3) : '—';
         } catch {}
         // History
         try {

@@ -48,6 +48,7 @@ class _SuppressLog(logging.Filter):
             "/api/decide/from_buffer",
             "/api/rl/threshold",
             "/api/rl/history",
+            "/api/rl/delta_baseline",
         ]
         return not any(l in line for l in suppressed_lines)
 

@@ -253,6 +253,17 @@ async def rl_threshold():
     return {"threshold": float(thr)}
 
 
+@router.get("/rl/delta_baseline", tags=["rl"])
+async def rl_delta_baseline():
+    try:
+        delta_baseline = ThresholdLinUCBAgent.get_instance().get_delta_baseline()
+        if delta_baseline is None:
+            return {"delta_baseline": None}
+        return {"delta_baseline": float(delta_baseline)}
+    except Exception:
+        return {"delta_baseline": None}
+
+
 @router.get("/rl/history", tags=["rl"])
 async def rl_history():
     hist = HistoryService.get_instance().get_notification_history()

@@ -153,6 +153,10 @@ class ThresholdLinUCBAgent:
     def get_last_decision_threshold(self) -> float:
         return float(self._last_decision_threshold)
 
+    def get_delta_baseline(self) -> Optional[float]:
+        """Return the current EWMA delta baseline (mean delta)."""
+        return self._delta_baseline
+
     # ------------------------------------------------------------------ #
     # Internals
     # ------------------------------------------------------------------ #
