@@ -241,8 +241,10 @@ async def calibration_stop():
     return {"ok": True, "calibrating": False}
 
 
-@router.get("/rl/threshold", tags=["rl"])
-async def rl_threshold():
+@router.get("/rl/status", tags=["rl"])
+async def rl_status():
+    """Consolidated RL status endpoint returning threshold, band bounds, and history."""
+    # Get threshold
     try:
         thr = ThresholdTSAgent.get_instance().get_last_decision_threshold()
     except Exception:
@@ -250,37 +252,41 @@ async def rl_threshold():
             thr = float(NotificationService.get_instance().options.ml_bad_prob_threshold)
         except Exception:
             thr = 0.6
-    return {"threshold": float(thr)}
-
-
-
-
-@router.get("/rl/band_bounds", tags=["rl"])
-async def rl_band_bounds():
+    
+    # Get band bounds
     try:
         L, H = ThresholdTSAgent.get_instance().get_band_bounds()
-        return {"band_low": float(L), "band_high": float(H)}
+        band_low = float(L)
+        band_high = float(H)
     except Exception:
-        return {"band_low": None, "band_high": None}
-
-
-@router.get("/rl/history", tags=["rl"])
-async def rl_history():
-    hist = HistoryService.get_instance().get_notification_history()
-    # Take last 5 entries, most recent first
-    last5 = list(hist[-5:])[::-1]
-    data = []
-    for r in last5:
-        try:
-            data.append({
-                "bad_posture_prob": float(r.bad_posture_prob),
-                "delta": None if r.delta is None else float(r.delta),
-                "threshold": float(r.threshold),
-                "timestamp_ms": int(r.timestamp_ms),
-            })
-        except Exception:
-            continue
-    return {"history": data}
+        band_low = None
+        band_high = None
+    
+    # Get history
+    try:
+        hist = HistoryService.get_instance().get_notification_history()
+        # Take last 5 entries, most recent first
+        last5 = list(hist[-5:])[::-1]
+        data = []
+        for r in last5:
+            try:
+                data.append({
+                    "bad_posture_prob": float(r.bad_posture_prob),
+                    "delta": None if r.delta is None else float(r.delta),
+                    "threshold": float(r.threshold),
+                    "timestamp_ms": int(r.timestamp_ms),
+                })
+            except Exception:
+                continue
+    except Exception:
+        data = []
+    
+    return {
+        "threshold": float(thr),
+        "band_low": band_low,
+        "band_high": band_high,
+        "history": data,
+    }
 
 
 @router.post("/rl/threshold/decide", tags=["rl"])

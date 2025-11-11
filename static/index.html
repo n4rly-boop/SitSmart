@@ -414,29 +414,24 @@
       setInterval(updateLastNotified, 1000);
 
       async function refreshRlPanel(){
-        // Threshold
         try {
-          const r = await fetch('/api/rl/threshold');
+          const r = await fetch('/api/rl/status');
           const j = await r.json();
+          
+          // Threshold
           const thr = Number(j && j.threshold);
-          const el = document.getElementById('rlThreshold');
-          el.textContent = Number.isFinite(thr) ? thr.toFixed(2) : '—';
-        } catch {}
-        // Band bounds
-        try {
-          const r = await fetch('/api/rl/band_bounds');
-          const j = await r.json();
+          const rlThresholdEl = document.getElementById('rlThreshold');
+          rlThresholdEl.textContent = Number.isFinite(thr) ? thr.toFixed(2) : '—';
+          
+          // Band bounds
           const L = (j && typeof j.band_low === 'number' && Number.isFinite(j.band_low)) ? Number(j.band_low) : null;
           const H = (j && typeof j.band_high === 'number' && Number.isFinite(j.band_high)) ? Number(j.band_high) : null;
-          const elL = document.getElementById('rlBandLow');
-          const elH = document.getElementById('rlBandHigh');
-          elL.textContent = (L !== null) ? L.toFixed(3) : '—';
-          elH.textContent = (H !== null) ? H.toFixed(3) : '—';
-        } catch {}
-        // History
-        try {
-          const r = await fetch('/api/rl/history');
-          const j = await r.json();
+          const rlBandLowEl = document.getElementById('rlBandLow');
+          const rlBandHighEl = document.getElementById('rlBandHigh');
+          rlBandLowEl.textContent = (L !== null) ? L.toFixed(3) : '—';
+          rlBandHighEl.textContent = (H !== null) ? H.toFixed(3) : '—';
+          
+          // History
           const list = (j && Array.isArray(j.history)) ? j.history : [];
           const html = list.map((e) => {
             const ts = e && e.timestamp_ms ? new Date(e.timestamp_ms).toLocaleTimeString() : '';
@@ -445,8 +440,8 @@
             const th = (e && typeof e.threshold === 'number' && isFinite(e.threshold)) ? e.threshold.toFixed(2) : '—';
             return `<div>t=${ts}  prob=${bp}  delta=${dt}  thr=${th}</div>`;
           }).join('');
-          const el = document.getElementById('rlHistory');
-          el.innerHTML = html || '<div>no history</div>';
+          const rlHistoryEl = document.getElementById('rlHistory');
+          rlHistoryEl.innerHTML = html || '<div>no history</div>';
         } catch {}
       }
 
