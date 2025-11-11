@@ -1,4 +1,3 @@
-import os
 import time
 from collections import deque
 from dataclasses import dataclass
@@ -6,6 +5,7 @@ from typing import Deque, Dict, Optional
 
 import numpy as np
 
+from app.config import get_rl_config, RLConfig
 from app.services.history_service import HistoryService
 
 
@@ -26,21 +26,32 @@ class TSConfig:
     """
 
     # Core RL
-    eta: float = float(os.getenv("RL_THRESHOLD_STEP", 0.03))
-    
+    eta: float
     # Threshold bounds
-    tau_min: float = float(os.getenv("RL_TAU_MIN", 0.5))
-    tau_max: float = float(os.getenv("RL_TAU_MAX", 0.95))
-    initial_threshold: float = float(os.getenv("ML_BAD_PROB_THRESHOLD", 0.6))
-    
+    tau_min: float
+    tau_max: float
+    initial_threshold: float
     # Band boundaries (learned via quantiles)
-    band_q_low: float = float(os.getenv("RL_BAND_Q_LOW", 0.3))
-    band_q_high: float = float(os.getenv("RL_BAND_Q_HIGH", 0.6))
-    band_quantile_lr: float = float(os.getenv("RL_BAND_Q_LR", 0.03))
+    band_q_low: float
+    band_q_high: float
+    band_quantile_lr: float
 
     def actions(self) -> tuple[float, float, float]:
         step = abs(float(self.eta))
         return (0.0, -step, step)
+
+    @classmethod
+    def from_rl_config(cls, config: RLConfig) -> "TSConfig":
+        """Create TSConfig from RLConfig."""
+        return cls(
+            eta=config.eta,
+            tau_min=config.tau_min,
+            tau_max=config.tau_max,
+            initial_threshold=config.initial_threshold,
+            band_q_low=config.band_q_low,
+            band_q_high=config.band_q_high,
+            band_quantile_lr=config.band_quantile_lr,
+        )
 
 
 @dataclass
@@ -68,7 +79,10 @@ class ThresholdTSAgent:
     _instance: Optional["ThresholdTSAgent"] = None
 
     def __init__(self, config: Optional[TSConfig] = None) -> None:
-        self._config = config or TSConfig()
+        if config is None:
+            rl_config = get_rl_config()
+            config = TSConfig.from_rl_config(rl_config)
+        self._config = config
         self._actions = self._config.actions()
 
         thr = float(self._config.initial_threshold)

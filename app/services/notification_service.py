@@ -1,7 +1,3 @@
-
-
-import json
-import os
 import time
 import urllib.request
 from dataclasses import dataclass
@@ -31,8 +27,7 @@ class NotificationService:
         self.options = options or NotificationOptions()
         self._last_notified_at_ms: int = 0
         if not self.options.webhook_url:
-            base = os.getenv("NOTIFICATION_WEBHOOK_URL", "http://127.0.0.1:8000/api/notifications/webhook")
-            self.options.webhook_url = base
+            self.options.webhook_url = _CONFIG.notification_webhook_url
 
     @classmethod
     def get_instance(cls) -> "NotificationService":

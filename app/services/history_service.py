@@ -1,14 +1,10 @@
-
-
-import os
-import json
-import urllib.request
 import threading
 import time
 import math
 from dataclasses import dataclass
-from statistics import median
-from typing import Dict, List, Optional, Tuple
+from typing import Dict, List, Optional
+
+from app.config import get_history_config
 
 @dataclass
 class NotificationRecord:
@@ -34,12 +30,9 @@ class HistoryService:
         # Notification history – never trimmed per requirements
         self._notification_history: List[NotificationRecord] = []
 
-        # Use in-process service for features to avoid self-HTTP deadlocks
-        self._api_base: str = os.getenv("RL_API_BASE_URL", "http://127.0.0.1:8000/api")
-
-        # Config
-        self._delta_range_seconds: float = float(os.getenv("RL_DELTA_RANGE_SECONDS", "5"))
-        self._feature_time_tolerance_ms: int = int(os.getenv("RL_FEATURE_TOLERANCE_MS", "2000"))
+        # Load config
+        config = get_history_config()
+        self._delta_range_seconds: float = config.delta_range_seconds
 
         # Concurrency control for histories
         self._lock = threading.RLock()
@@ -52,17 +45,16 @@ class HistoryService:
         return cls._instance
 
     # --------------- Feature access via service ---------------
-    def _get_f1_features(self) -> Optional[Dict[str, float]]:
+    def _get_features(self, use_mean: bool = True) -> Optional[Dict[str, float]]:
+        """Get features from FeatureAggregateService.
+        
+        Args:
+            use_mean: If True, return mean features (f1), else return last features (f2).
+        """
         try:
             from app.services.feature_aggregate_service import FeatureAggregateService
-            return FeatureAggregateService.get_instance().mean_features()
-        except Exception:
-            return None
-
-    def _get_f2_features(self) -> Optional[Dict[str, float]]:
-        try:
-            from app.services.feature_aggregate_service import FeatureAggregateService
-            return FeatureAggregateService.get_instance().last_features()
+            service = FeatureAggregateService.get_instance()
+            return service.mean_features() if use_mean else service.last_features()
         except Exception:
             return None
 
@@ -89,6 +81,7 @@ class HistoryService:
         ).start()
 
     def _compute_and_store_delta(self, record_index: int) -> None:
+        """Compute and store delta for a notification record after delay."""
         # Sleep until t + delta_range_seconds
         try:
             sleep_seconds = max(0.0, float(self._delta_range_seconds))
@@ -96,26 +89,29 @@ class HistoryService:
         except Exception:
             pass
 
+        # Get record and f1 features (with lock)
         with self._lock:
             if record_index < 0 or record_index >= len(self._notification_history):
                 return
             rec = self._notification_history[record_index]
             f1 = rec.f1_features
 
-        # If f1 was not provided, obtain it now (background) from aggregate mean
+        # Fetch features outside lock to avoid blocking
         if f1 is None:
-            f1 = self._get_f1_features()
+            f1 = self._get_features(use_mean=True)
+        f2 = self._get_features(use_mean=False)
 
-        # Fetch f2 (latest sample) from in-process service
-        f2 = self._get_f2_features()
-
-        # Compute delta outside lock to avoid long holds
+        # Compute delta outside lock
         delta_value = self._compute_delta_value(f1, f2)
 
+        # Update record (with lock)
         with self._lock:
-            # Update the stored record
+            # Re-check bounds in case history was cleared
+            if record_index < 0 or record_index >= len(self._notification_history):
+                return
             self._notification_history[record_index].delta = delta_value
-            self._notification_history[record_index].f1_features = f1
+            if f1 is not None:
+                self._notification_history[record_index].f1_features = f1
 
     # --------------- History maintenance ---------------
     def clear_history(self) -> None:
@@ -164,41 +160,14 @@ class HistoryService:
         return self._delta_to_scalar(deltas)
 
     def _delta_to_scalar(self, delta: List[float]) -> float:
+        """Convert list of delta values to a single scalar using root mean formula."""
         bias = 0.1
-        return float(math.sqrt(max((sum(delta) - bias),0) / max((float(len(delta) - bias),1))))
+        numerator = max(sum(delta) - bias, 0.0)
+        denominator = max(float(len(delta) - bias), 1.0)
+        return float(math.sqrt(numerator / denominator))
+
     # --------------- Accessors ---------------
     def get_notification_history(self) -> List[NotificationRecord]:
+        """Get a copy of all notification history records."""
         with self._lock:
             return list(self._notification_history)
-
-    def get_history_vectors(self) -> List[Tuple[float, Optional[float], float, int]]:
-        with self._lock:
-            return [
-                (r.bad_posture_prob, r.delta, r.threshold, r.timestamp_ms)
-                for r in self._notification_history
-            ]
-
-    def get_meaningful_delta_threshold(self) -> Optional[float]:
-        """User-specific dynamic meaningful delta threshold using full history.
-
-        Uses configurable quantile across observed deltas to adapt to the user.
-        """
-        q = float(os.getenv("RL_MEANINGFUL_DELTA_QUANTILE", "0.5"))
-        with self._lock:
-            deltas = [r.delta for r in self._notification_history if r.delta is not None]
-        if not deltas:
-            return None
-        try:
-            # Compute quantile via median if q==0.5, otherwise interpolate
-            if q == 0.5:
-                return float(median(deltas))
-            sorted_vals = sorted(deltas)
-            if len(sorted_vals) == 1:
-                return float(sorted_vals[0])
-            pos = q * (len(sorted_vals) - 1)
-            lo = int(pos)
-            hi = min(lo + 1, len(sorted_vals) - 1)
-            frac = pos - lo
-            return float(sorted_vals[lo] * (1.0 - frac) + sorted_vals[hi] * frac)
-        except Exception:
-            return None
