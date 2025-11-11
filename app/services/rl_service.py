@@ -11,23 +11,49 @@ from app.services.history_service import HistoryService
 
 @dataclass
 class TSConfig:
-    """Hyper-parameters for the threshold Thompson Sampling agent."""
+    """Hyper-parameters for the adaptive threshold agent.
+    
+    Core RL Parameters:
+    - eta: Step size for threshold adjustments (actions: -eta, 0, +eta). Larger = faster adaptation but more jitter.
+    
+    Threshold Bounds:
+    - tau_min, tau_max: Hard limits for notification threshold. Prevents extreme values.
+    - initial_threshold: Starting threshold value. Should match user's initial ML threshold setting.
+    
+    Reward Shaping:
+    - penalty_notification: Per-notification penalty (always applied). Reduces spam, encourages selectivity.
+    - change_cost: Small penalty for changing threshold (action != 0). Reduces jitter, encourages stability.
+    - reward_clip_min/max: Hard bounds on reward values. Prevents extreme updates, stabilizes learning.
+    
+    Delta Baseline (User Adaptation):
+    - delta_baseline_beta: EWMA step for tracking user's mean delta. Higher = faster adaptation to user changes.
+    
+    Band-Based Boundaries (Delta Band):
+    - band_q_low/high: Target quantiles for adaptive band boundaries. Low delta < L → raise threshold, delta > H → lower threshold.
+    - band_quantile_lr: Learning rate for online quantile estimation (Robbins-Monro). Lower = slower adaptation.
+    """
 
-    eta: float = float(os.getenv("RL_THRESHOLD_STEP", 0.03)) # threshold step size
-    lambda_reg: float = float(os.getenv("RL_LAMBDA_REG", 1e-3)) # regularization parameter
-    tau_min: float = float(os.getenv("RL_TAU_MIN", 0.5)) # minimum threshold
-    tau_max: float = float(os.getenv("RL_TAU_MAX", 0.95)) # maximum threshold
-    gamma: float = float(os.getenv("RL_FORGETTING_GAMMA", 1.0)) # forgetting factor
-    penalty_notification: float = float(os.getenv("RL_PENALTY_NOTIF", 0.05)) # penalty for notification
-    reward_clip_min: float = -1.0 # minimum reward
-    reward_clip_max: float = 1.0 # maximum reward
-    initial_threshold: float = float(os.getenv("ML_BAD_PROB_THRESHOLD", 0.6)) # initial threshold
-    # Thompson Sampling noise scale
-    ts_sigma: float = float(os.getenv("RL_TS_SIGMA", 0.05))
-    # Small cost to changing threshold to discourage jitter
+    # Core RL
+    eta: float = float(os.getenv("RL_THRESHOLD_STEP", 0.03))
+    
+    # Threshold bounds
+    tau_min: float = float(os.getenv("RL_TAU_MIN", 0.5))
+    tau_max: float = float(os.getenv("RL_TAU_MAX", 0.95))
+    initial_threshold: float = float(os.getenv("ML_BAD_PROB_THRESHOLD", 0.6))
+    
+    # Reward shaping
+    penalty_notification: float = float(os.getenv("RL_PENALTY_NOTIF", 0.05))
     change_cost: float = float(os.getenv("RL_CHANGE_COST", 0.002))
-    # EWMA step for delta baseline (per-user)
+    reward_clip_min: float = float(os.getenv("RL_REWARD_CLIP_MIN", -1.0))
+    reward_clip_max: float = float(os.getenv("RL_REWARD_CLIP_MAX", 1.0))
+    
+    # Delta baseline
     delta_baseline_beta: float = float(os.getenv("RL_DELTA_BASELINE_BETA", 0.1))
+    
+    # Band boundaries (learned via quantiles)
+    band_q_low: float = float(os.getenv("RL_BAND_Q_LOW", 0.3))
+    band_q_high: float = float(os.getenv("RL_BAND_Q_HIGH", 0.7))
+    band_quantile_lr: float = float(os.getenv("RL_BAND_Q_LR", 0.02))
 
     def actions(self) -> tuple[float, float, float]:
         step = abs(float(self.eta))
@@ -46,35 +72,22 @@ class DecisionState:
     history_index: Optional[int] = None
 
 
-@dataclass
-class _ModelState:
-    A: np.ndarray
-    A_inv: np.ndarray
-    b: np.ndarray
-
-    @classmethod
-    def create(cls, dim: int, regularization: float) -> "_ModelState":
-        A = np.eye(dim, dtype=np.float64) * float(regularization)
-        return cls(A=A, A_inv=np.linalg.inv(A), b=np.zeros(dim, dtype=np.float64))
-
-    def theta(self) -> np.ndarray:
-        return self.A_inv @ self.b
-
-
 class ThresholdTSAgent:
-    """Online Thompson Sampling agent that adapts the global notification threshold."""
+    """Adaptive threshold agent with deterministic action selection.
+    
+    Actions are rule-based based on delta bounds (L/H):
+    - delta < L → raise threshold
+    - delta > H → lower threshold
+    - L ≤ delta ≤ H → hold
+    
+    The agent learns to adapt L/H boundaries via online quantile estimation.
+    """
 
     _instance: Optional["ThresholdTSAgent"] = None
 
     def __init__(self, config: Optional[TSConfig] = None) -> None:
         self._config = config or TSConfig()
-        # Base context features (without action):
-        # [1, bad_prob, bad_prob^2, thr, thr^2, bad_prob-thr, mu]
-        self._base_dim = 7
         self._actions = self._config.actions()
-        # Joint model over (base_context, action, action^2, base_context * action)
-        self._joint_dim = 2 * self._base_dim + 2
-        self._model: _ModelState = _ModelState.create(self._joint_dim, self._config.lambda_reg)
 
         thr = float(self._config.initial_threshold)
         self._current_threshold: float = float(self._clip(thr))
@@ -88,6 +101,9 @@ class ThresholdTSAgent:
         self._awaiting_delta: Dict[int, DecisionState] = {}
         self._last_applied_action: float = 0.0
         self._delta_baseline: Optional[float] = None
+        # Online quantile trackers for band boundaries
+        self._q_low_val: float = 0.2
+        self._q_high_val: float = 0.8
 
     # ------------------------------------------------------------------ #
     # Public API
@@ -158,6 +174,11 @@ class ThresholdTSAgent:
         """Return the current EWMA delta baseline (mean delta)."""
         return self._delta_baseline
 
+    def get_band_bounds(self) -> tuple[Optional[float], Optional[float]]:
+        """Return the current delta band boundaries (L, H)."""
+        L, H = self._get_band_bounds()
+        return (L, H)
+
     # ------------------------------------------------------------------ #
     # Internals
     # ------------------------------------------------------------------ #
@@ -167,49 +188,41 @@ class ThresholdTSAgent:
         return int(now * 1000)
 
     def _build_base_context(self, bad_prob: float, thr: float, mu: float) -> np.ndarray:
-        return np.array([
-            1.0,
-            bad_prob,
-            bad_prob**2,
-            thr,
-            thr**2,
-            bad_prob - thr,
-            mu,
-        ], dtype=np.float64)
+        """Build context for tracking (not used for action selection anymore)."""
+        L, H = self._get_band_bounds()
+        return np.array([1.0, bad_prob, bad_prob**2, thr, thr**2, bad_prob - thr, mu, L, H], dtype=np.float64)
 
     def _build_context(self, bad_prob: float) -> np.ndarray:
-        thr = float(self._current_threshold)
         mu = float(self._delta_baseline if self._delta_baseline is not None else 0.1)
-        return self._build_base_context(bad_prob, thr, mu)
+        return self._build_base_context(bad_prob, float(self._current_threshold), mu)
 
-    def _build_joint_context(self, base_context: np.ndarray, action: float) -> np.ndarray:
-        a = float(action)
-        return np.concatenate([
-            base_context,
-            np.array([a, a * a], dtype=np.float64),
-            base_context * a,
-        ])
 
-    def _select_action(self, base_context: np.ndarray) -> float:
-        # Thompson Sampling: sample theta ~ N(θ̂, σ² A_inv)
-        theta = self._model.theta()
-        cov = float(self._config.ts_sigma) ** 2 * self._model.A_inv
-        # Ensure numerical stability of covariance
-        try:
-            theta_sample = np.random.multivariate_normal(theta, cov)
-        except Exception:
-            jitter = 1e-8
-            theta_sample = np.random.multivariate_normal(theta, cov + jitter * np.eye(len(theta)))
-
-        best_action = 0.0
-        best_score = float("-inf")
-        for action in self._actions:
-            joint_ctx = self._build_joint_context(base_context, action)
-            score = float(joint_ctx @ theta_sample)
-            if score > best_score:
-                best_score = score
-                best_action = action
-        return float(best_action)
+    def _select_action(self, base_context: Optional[np.ndarray], delta: Optional[float] = None) -> float:
+        """Select action deterministically based on delta bounds.
+        
+        Actions are now rule-based:
+        - delta < L → raise threshold (+eta)
+        - delta > H → lower threshold (-eta)  
+        - L ≤ delta ≤ H → hold (0)
+        
+        The RL agent only learns to adapt L/H boundaries via online quantile estimation.
+        """
+        if delta is not None:
+            d = float(max(0.0, min(1.0, delta)))
+        elif base_context is not None and len(base_context) > 6:
+            # Use mu (delta baseline) as proxy when delta not available
+            d = float(base_context[6])
+        else:
+            d = float(self._delta_baseline if self._delta_baseline is not None else 0.1)
+        
+        L, H = self._get_band_bounds()
+        
+        if d < L:
+            return float(self._config.eta)  # Raise threshold
+        elif d > H:
+            return -float(self._config.eta)  # Lower threshold
+        else:
+            return 0.0  # Hold
 
     def _clip(self, value: float) -> float:
         return float(max(self._config.tau_min, min(self._config.tau_max, value)))
@@ -236,67 +249,74 @@ class ThresholdTSAgent:
             delta = getattr(record, "delta", None)
             if delta is None:
                 continue
-            # Rebuild base context at decision time using stored bad_prob, threshold, and current mu
             mu_val = float(self._delta_baseline if self._delta_baseline is not None else 0.1)
-            base_ctx = self._build_base_context(float(decision.bad_prob), float(decision.threshold_after), mu_val)
-
             reward = self._compute_reward(decision, delta)
-            self._update_model_with(base_ctx, float(decision.action), reward)
             self._last_reward = reward
             self._awaiting_delta.pop(idx, None)
 
-            # After applying reward, adapt the threshold now (post-delta)
+            d = float(max(0.0, min(1.0, delta if delta is not None else 0.0)))
+            
             try:
-                next_action = self._select_action(base_ctx)
+                # Use actual delta for deterministic action selection
+                next_action = self._select_action(None, delta=d)
                 new_thr = self._clip(self._current_threshold + next_action)
                 self._current_threshold = new_thr
                 self._last_decision_threshold = new_thr
                 self._last_applied_action = float(next_action)
             except Exception:
-                # If anything goes wrong, keep current threshold unchanged
                 pass
 
-            # Update EWMA delta baseline after using it for reward
-            try:
-                beta = float(self._config.delta_baseline_beta)
-                d = float(delta if delta is not None else 0.0)
-                if self._delta_baseline is None:
-                    self._delta_baseline = d
-                else:
-                    self._delta_baseline = (1.0 - beta) * float(self._delta_baseline) + beta * d
-                if self._delta_baseline < 0.0:
-                    self._delta_baseline = 0.0
-                if self._delta_baseline > 1.0:
-                    self._delta_baseline = 1.0
-            except Exception:
-                pass
+            self._update_delta_baseline(d)
+            self._update_band_quantiles(d)
 
     def _compute_reward(self, decision: DecisionState, delta_value: float) -> float:
-        delta_val = max(float(delta_value or 0.0), 0.0)
-        mu = float(self._delta_baseline if self._delta_baseline is not None else 0.1)
-        # Directional reward: sign(a)*(mu - delta)
-        action_sign = 0.0 if decision.action == 0.0 else (1.0 if decision.action > 0.0 else -1.0)
-        directional = (mu - delta_val) * action_sign
-        # Small penalties
-        penalty_notif = float(self._config.penalty_notification)
+        """Compute reward for learning L/H boundaries.
+        
+        Since actions are now deterministic, reward is used only to validate
+        that the chosen action was appropriate, which helps adapt L/H boundaries.
+        """
+        d = float(max(0.0, min(1.0, delta_value)))
+        L, H = self._get_band_bounds()
+        
+        # Simple reward: positive if action matches desired behavior, negative otherwise
+        if decision.action > 0.0:  # +eta (raise threshold)
+            # Good if delta < L, bad otherwise
+            reward = 1.0 if d < L else -0.5
+        elif decision.action < 0.0:  # -eta (lower threshold)
+            # Good if delta > H, bad otherwise
+            reward = 1.0 if d > H else -0.5
+        else:  # hold (action = 0)
+            # Good if L ≤ delta ≤ H, bad otherwise
+            reward = 1.0 if (L <= d <= H) else -0.5
+        
+        penalty = float(self._config.penalty_notification)
         change_penalty = float(self._config.change_cost) if decision.action != 0.0 else 0.0
-        reward = directional - penalty_notif - change_penalty
-        return float(
-            max(self._config.reward_clip_min, min(self._config.reward_clip_max, reward))
-        )
+        reward = reward - penalty - change_penalty
+        return float(max(self._config.reward_clip_min, min(self._config.reward_clip_max, reward)))
 
-    def _update_model_with(self, base_context: np.ndarray, action: float, reward: float) -> None:
-        gamma = float(self._config.gamma)
+    def _get_band_bounds(self) -> tuple[float, float]:
+        L = float(max(0.0, min(1.0, self._q_low_val)))
+        H = float(max(0.0, min(1.0, self._q_high_val)))
+        if H < L:
+            mid = 0.5 * (L + H)
+            L, H = max(0.0, mid - 1e-3), min(1.0, mid + 1e-3)
+        return (L, H)
 
-        joint_ctx = self._build_joint_context(base_context, action)
+    def _update_delta_baseline(self, delta_val: float) -> None:
+        beta = float(self._config.delta_baseline_beta)
+        if self._delta_baseline is None:
+            self._delta_baseline = delta_val
+        else:
+            self._delta_baseline = (1.0 - beta) * float(self._delta_baseline) + beta * delta_val
+        self._delta_baseline = float(max(0.0, min(1.0, self._delta_baseline)))
 
-        if 0.0 < gamma < 1.0:
-            self._model.A = gamma * self._model.A + (1.0 - gamma) * np.eye(self._joint_dim, dtype=np.float64)
-            self._model.b = gamma * self._model.b
-
-        self._model.A = self._model.A + np.outer(joint_ctx, joint_ctx)
-        self._model.b = self._model.b + reward * joint_ctx
-        try:
-            self._model.A_inv = np.linalg.inv(self._model.A)
-        except np.linalg.LinAlgError:
-            self._model.A_inv = np.linalg.pinv(self._model.A)
+    def _update_band_quantiles(self, delta_val: float) -> None:
+        lr = float(self._config.band_quantile_lr)
+        qL, qH = float(self._config.band_q_low), float(self._config.band_q_high)
+        self._q_low_val += lr * (qL - (1.0 if delta_val <= self._q_low_val else 0.0))
+        self._q_high_val += lr * (qH - (1.0 if delta_val <= self._q_high_val else 0.0))
+        self._q_low_val = float(max(0.0, min(1.0, self._q_low_val)))
+        self._q_high_val = float(max(0.0, min(1.0, self._q_high_val)))
+        if self._q_high_val < self._q_low_val:
+            mid = 0.5 * (self._q_low_val + self._q_high_val)
+            self._q_low_val, self._q_high_val = max(0.0, mid - 1e-3), min(1.0, mid + 1e-3)

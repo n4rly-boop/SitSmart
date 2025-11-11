@@ -84,6 +84,9 @@
         <div style="display:flex;justify-content:space-between;align-items:center;gap:8px;flex-wrap:wrap;margin-top:8px;">
           <div>Current mean delta: <span id="rlDeltaBaseline">—</span></div>
         </div>
+        <div style="display:flex;justify-content:space-between;align-items:center;gap:8px;flex-wrap:wrap;margin-top:8px;">
+          <div>Delta band: L=<span id="rlBandLow">—</span> H=<span id="rlBandHigh">—</span></div>
+        </div>
         <div style="margin-top:10px;">
           <div style="font-weight:600;margin-bottom:6px;">Last 5 notifications</div>
           <div id="rlHistory" style="font-family:ui-monospace, SFMono-Regular, Menlo, monospace; font-size: 12px; white-space: pre-wrap; background:#f9fafb; border:1px dashed #e5e7eb; padding:8px; border-radius:6px; min-height:60px;"></div>
@@ -398,6 +401,17 @@
           const deltaBaseline = j && j.delta_baseline !== null ? Number(j.delta_baseline) : null;
           const el = document.getElementById('rlDeltaBaseline');
           el.textContent = (deltaBaseline !== null && Number.isFinite(deltaBaseline)) ? deltaBaseline.toFixed(3) : '—';
+        } catch {}
+        // Band bounds
+        try {
+          const r = await fetch('/api/rl/band_bounds');
+          const j = await r.json();
+          const L = (j && typeof j.band_low === 'number' && Number.isFinite(j.band_low)) ? Number(j.band_low) : null;
+          const H = (j && typeof j.band_high === 'number' && Number.isFinite(j.band_high)) ? Number(j.band_high) : null;
+          const elL = document.getElementById('rlBandLow');
+          const elH = document.getElementById('rlBandHigh');
+          elL.textContent = (L !== null) ? L.toFixed(3) : '—';
+          elH.textContent = (H !== null) ? H.toFixed(3) : '—';
         } catch {}
         // History
         try {

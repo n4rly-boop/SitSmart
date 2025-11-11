@@ -264,6 +264,15 @@ async def rl_delta_baseline():
         return {"delta_baseline": None}
 
 
+@router.get("/rl/band_bounds", tags=["rl"])
+async def rl_band_bounds():
+    try:
+        L, H = ThresholdTSAgent.get_instance().get_band_bounds()
+        return {"band_low": float(L), "band_high": float(H)}
+    except Exception:
+        return {"band_low": None, "band_high": None}
+
+
 @router.get("/rl/history", tags=["rl"])
 async def rl_history():
     hist = HistoryService.get_instance().get_notification_history()
