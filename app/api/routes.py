@@ -6,7 +6,7 @@ from app.api.schemas import FeatureExtractionResponse, Notification, Notificatio
 from app.services.history_service import HistoryService
 from app.services.pose_service import PoseService, PoseServiceUnavailable
 from app.services.notification_service import NotificationService
-from app.services.rl_service import ThresholdLinUCBAgent
+from app.services.rl_service import ThresholdTSAgent
 from app.services.feature_aggregate_service import FeatureAggregateService
 from app.services.calibration_service import CalibrationService
 from app.services.ml_service import MLService
@@ -244,7 +244,7 @@ async def calibration_stop():
 @router.get("/rl/threshold", tags=["rl"])
 async def rl_threshold():
     try:
-        thr = ThresholdLinUCBAgent.get_instance().get_last_decision_threshold()
+        thr = ThresholdTSAgent.get_instance().get_last_decision_threshold()
     except Exception:
         try:
             thr = float(NotificationService.get_instance().options.ml_bad_prob_threshold)
@@ -256,7 +256,7 @@ async def rl_threshold():
 @router.get("/rl/delta_baseline", tags=["rl"])
 async def rl_delta_baseline():
     try:
-        delta_baseline = ThresholdLinUCBAgent.get_instance().get_delta_baseline()
+        delta_baseline = ThresholdTSAgent.get_instance().get_delta_baseline()
         if delta_baseline is None:
             return {"delta_baseline": None}
         return {"delta_baseline": float(delta_baseline)}
@@ -289,7 +289,7 @@ async def rl_threshold_decide(payload: dict):
         bad_prob = float(payload.get("bad_posture_prob", 0.0))
     except Exception:
         bad_prob = 0.0
-    agent = ThresholdLinUCBAgent.get_instance()
+    agent = ThresholdTSAgent.get_instance()
     try:
         threshold = agent.estimate_threshold(bad_prob)
     except Exception:

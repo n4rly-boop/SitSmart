@@ -10,8 +10,8 @@ from app.services.history_service import HistoryService
 
 
 @dataclass
-class LinUCBConfig:
-    """Hyper-parameters for the threshold LinUCB agent."""
+class TSConfig:
+    """Hyper-parameters for the threshold Thompson Sampling agent."""
 
     eta: float = float(os.getenv("RL_THRESHOLD_STEP", 0.03)) # threshold step size
     lambda_reg: float = float(os.getenv("RL_LAMBDA_REG", 1e-3)) # regularization parameter
@@ -26,8 +26,6 @@ class LinUCBConfig:
     ts_sigma: float = float(os.getenv("RL_TS_SIGMA", 0.05))
     # Small cost to changing threshold to discourage jitter
     change_cost: float = float(os.getenv("RL_CHANGE_COST", 0.002))
-    # EWMA step for delta baseline (per-user)
-    delta_baseline_beta: float = float(os.getenv("RL_DELTA_BASELINE_BETA", 0.1))
     # EWMA step for delta baseline (per-user)
     delta_baseline_beta: float = float(os.getenv("RL_DELTA_BASELINE_BETA", 0.1))
 
@@ -63,13 +61,13 @@ class _ModelState:
         return self.A_inv @ self.b
 
 
-class ThresholdLinUCBAgent:
-    """Online LinUCB agent that adapts the global notification threshold."""
+class ThresholdTSAgent:
+    """Online Thompson Sampling agent that adapts the global notification threshold."""
 
-    _instance: Optional["ThresholdLinUCBAgent"] = None
+    _instance: Optional["ThresholdTSAgent"] = None
 
-    def __init__(self, config: Optional[LinUCBConfig] = None) -> None:
-        self._config = config or LinUCBConfig()
+    def __init__(self, config: Optional[TSConfig] = None) -> None:
+        self._config = config or TSConfig()
         # Base context features (without action):
         # [1, bad_prob, bad_prob^2, thr, thr^2, bad_prob-thr, mu]
         self._base_dim = 7
@@ -90,20 +88,19 @@ class ThresholdLinUCBAgent:
         self._awaiting_delta: Dict[int, DecisionState] = {}
         self._last_applied_action: float = 0.0
         self._delta_baseline: Optional[float] = None
-        self._delta_baseline: Optional[float] = None
 
     # ------------------------------------------------------------------ #
     # Public API
     # ------------------------------------------------------------------ #
 
     @classmethod
-    def get_instance(cls) -> "ThresholdLinUCBAgent":
+    def get_instance(cls) -> "ThresholdTSAgent":
         if cls._instance is None:
             cls._instance = cls()
         return cls._instance
 
     def decide(self, bad_prob: float, now_seconds: Optional[float] = None) -> Dict[str, float | bool | int | None]:
-        """Run the LinUCB policy once and stage the outcome."""
+        """Stage a decision without adapting threshold. Notification uses current threshold only."""
         now_ms = self._now_ms(now_seconds)
         self._refresh_history()
 
