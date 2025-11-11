@@ -253,15 +253,6 @@ async def rl_threshold():
     return {"threshold": float(thr)}
 
 
-@router.get("/rl/delta_baseline", tags=["rl"])
-async def rl_delta_baseline():
-    try:
-        delta_baseline = ThresholdTSAgent.get_instance().get_delta_baseline()
-        if delta_baseline is None:
-            return {"delta_baseline": None}
-        return {"delta_baseline": float(delta_baseline)}
-    except Exception:
-        return {"delta_baseline": None}
 
 
 @router.get("/rl/band_bounds", tags=["rl"])
@@ -294,16 +285,13 @@ async def rl_history():
 
 @router.post("/rl/threshold/decide", tags=["rl"])
 async def rl_threshold_decide(payload: dict):
+    """Estimate next threshold (requires delta to be meaningful)."""
     try:
-        bad_prob = float(payload.get("bad_posture_prob", 0.0))
-    except Exception:
-        bad_prob = 0.0
-    agent = ThresholdTSAgent.get_instance()
-    try:
-        threshold = agent.estimate_threshold(bad_prob)
-    except Exception:
+        agent = ThresholdTSAgent.get_instance()
         threshold = agent.get_current_threshold()
-    return {"threshold": float(threshold)}
+        return {"threshold": float(threshold)}
+    except Exception:
+        return {"threshold": 0.6}
 
 
 @router.get("/features/aggregate/mean", tags=["aggregation"])
@@ -316,3 +304,24 @@ async def features_aggregate_mean():
 async def features_aggregate_clear():
     _agg.clear()
     return {"ok": True}
+
+
+@router.post("/reset", tags=["system"])
+async def reset_all():
+    """Fully reset agent state, history, and calibration."""
+    try:
+        # Reset RL agent
+        ThresholdTSAgent.get_instance().reset()
+    except Exception:
+        pass
+    try:
+        # Clear history
+        HistoryService.get_instance().clear_history()
+    except Exception:
+        pass
+    try:
+        # Clear feature aggregation buffer
+        _agg.clear()
+    except Exception:
+        pass
+    return {"ok": True, "message": "All services reset"}
