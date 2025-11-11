@@ -6,7 +6,7 @@ from typing import Dict, Optional
 
 from app.api.schemas import Notification, NotificationSeverity, ModelAnalysisResponse
 from app.config import get_config
-from app.services.rl_service import ThresholdTSAgent
+from app.services.rl_service import AdaptiveThresholdAgent
 from app.services.history_service import HistoryService
 
 
@@ -80,7 +80,7 @@ class NotificationService:
         now_ms = int(time.time() * 1000)
         bad_prob = float(response.bad_posture_prob or 0.0)
 
-        agent = ThresholdTSAgent.get_instance()
+        agent = AdaptiveThresholdAgent.get_instance()
         try:
             decision = agent.decide(bad_prob, now_seconds=now_ms / 1000.0)
         except Exception:

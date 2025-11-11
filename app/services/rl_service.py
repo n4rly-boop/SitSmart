@@ -10,7 +10,7 @@ from app.services.history_service import HistoryService
 
 
 @dataclass
-class TSConfig:
+class AdaptiveThresholdConfig:
     """Hyper-parameters for the adaptive threshold agent.
     
     Core RL Parameters:
@@ -41,8 +41,8 @@ class TSConfig:
         return (0.0, -step, step)
 
     @classmethod
-    def from_rl_config(cls, config: RLConfig) -> "TSConfig":
-        """Create TSConfig from RLConfig."""
+    def from_rl_config(cls, config: RLConfig) -> "AdaptiveThresholdConfig":
+        """Create AdaptiveThresholdConfig from RLConfig."""
         return cls(
             eta=config.eta,
             tau_min=config.tau_min,
@@ -65,7 +65,7 @@ class DecisionState:
     history_index: Optional[int] = None
 
 
-class ThresholdTSAgent:
+class AdaptiveThresholdAgent:
     """Adaptive threshold agent with deterministic action selection.
     
     Actions are rule-based based on delta bounds (L/H):
@@ -76,12 +76,12 @@ class ThresholdTSAgent:
     The agent learns to adapt L/H boundaries via online quantile estimation.
     """
 
-    _instance: Optional["ThresholdTSAgent"] = None
+    _instance: Optional["AdaptiveThresholdAgent"] = None
 
-    def __init__(self, config: Optional[TSConfig] = None) -> None:
+    def __init__(self, config: Optional[AdaptiveThresholdConfig] = None) -> None:
         if config is None:
             rl_config = get_rl_config()
-            config = TSConfig.from_rl_config(rl_config)
+            config = AdaptiveThresholdConfig.from_rl_config(rl_config)
         self._config = config
         self._actions = self._config.actions()
 
@@ -104,7 +104,7 @@ class ThresholdTSAgent:
     # ------------------------------------------------------------------ #
 
     @classmethod
-    def get_instance(cls) -> "ThresholdTSAgent":
+    def get_instance(cls) -> "AdaptiveThresholdAgent":
         if cls._instance is None:
             cls._instance = cls()
         return cls._instance

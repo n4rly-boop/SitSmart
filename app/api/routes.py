@@ -6,7 +6,7 @@ from app.api.schemas import FeatureExtractionResponse, Notification, Notificatio
 from app.services.history_service import HistoryService
 from app.services.pose_service import PoseService, PoseServiceUnavailable
 from app.services.notification_service import NotificationService
-from app.services.rl_service import ThresholdTSAgent
+from app.services.rl_service import AdaptiveThresholdAgent
 from app.services.feature_aggregate_service import FeatureAggregateService
 from app.services.calibration_service import CalibrationService
 from app.services.ml_service import MLService
@@ -246,7 +246,7 @@ async def rl_status():
     """Consolidated RL status endpoint returning threshold, band bounds, and history."""
     # Get threshold
     try:
-        thr = ThresholdTSAgent.get_instance().get_last_decision_threshold()
+        thr = AdaptiveThresholdAgent.get_instance().get_last_decision_threshold()
     except Exception:
         try:
             thr = float(NotificationService.get_instance().options.ml_bad_prob_threshold)
@@ -255,7 +255,7 @@ async def rl_status():
     
     # Get band bounds
     try:
-        L, H = ThresholdTSAgent.get_instance().get_band_bounds()
+        L, H = AdaptiveThresholdAgent.get_instance().get_band_bounds()
         band_low = float(L)
         band_high = float(H)
     except Exception:
@@ -293,7 +293,7 @@ async def rl_status():
 async def rl_threshold_decide(payload: dict):
     """Estimate next threshold (requires delta to be meaningful)."""
     try:
-        agent = ThresholdTSAgent.get_instance()
+        agent = AdaptiveThresholdAgent.get_instance()
         threshold = agent.get_current_threshold()
         return {"threshold": float(threshold)}
     except Exception:
@@ -317,7 +317,7 @@ async def reset_all():
     """Fully reset agent state, history, and calibration."""
     try:
         # Reset RL agent
-        ThresholdTSAgent.get_instance().reset()
+        AdaptiveThresholdAgent.get_instance().reset()
     except Exception:
         pass
     try:

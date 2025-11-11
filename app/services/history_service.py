@@ -161,10 +161,8 @@ class HistoryService:
 
     def _delta_to_scalar(self, delta: List[float]) -> float:
         """Convert list of delta values to a single scalar using root mean formula."""
-        bias = 0.1
-        numerator = max(sum(delta) - bias, 0.0)
-        denominator = max(float(len(delta) - bias), 1.0)
-        return float(math.sqrt(numerator / denominator))
+        bias = 0.05
+        return float(math.sqrt(max(0.0, sum(delta) / len(delta) - bias)))
 
     # --------------- Accessors ---------------
     def get_notification_history(self) -> List[NotificationRecord]:
