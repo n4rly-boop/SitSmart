@@ -1,7 +1,3 @@
-
-
-import json
-import os
 import time
 import urllib.request
 from dataclasses import dataclass
@@ -10,7 +6,7 @@ from typing import Dict, Optional
 
 from app.api.schemas import Notification, NotificationSeverity, ModelAnalysisResponse
 from app.config import get_config
-from app.services.rl_service import ThresholdLinUCBAgent
+from app.services.rl_service import AdaptiveThresholdAgent
 from app.services.history_service import HistoryService
 
 
@@ -31,8 +27,7 @@ class NotificationService:
         self.options = options or NotificationOptions()
         self._last_notified_at_ms: int = 0
         if not self.options.webhook_url:
-            base = os.getenv("NOTIFICATION_WEBHOOK_URL", "http://127.0.0.1:8000/api/notifications/webhook")
-            self.options.webhook_url = base
+            self.options.webhook_url = _CONFIG.notification_webhook_url
 
     @classmethod
     def get_instance(cls) -> "NotificationService":
@@ -85,7 +80,7 @@ class NotificationService:
         now_ms = int(time.time() * 1000)
         bad_prob = float(response.bad_posture_prob or 0.0)
 
-        agent = ThresholdLinUCBAgent.get_instance()
+        agent = AdaptiveThresholdAgent.get_instance()
         try:
             decision = agent.decide(bad_prob, now_seconds=now_ms / 1000.0)
         except Exception:

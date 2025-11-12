@@ -1,10 +1,7 @@
-
-
-import os
 from typing import Dict, Optional
 
+from app.config import get_config
 from app.services.feature_buffer import FeatureBuffer
-
 
 class FeatureAggregateService:
     _instance: Optional["FeatureAggregateService"] = None
@@ -15,8 +12,8 @@ class FeatureAggregateService:
     @classmethod
     def get_instance(cls) -> "FeatureAggregateService":
         if cls._instance is None:
-            seconds = int(os.getenv("FEATURE_BUFFER_SECONDS", "5"))
-            cls._instance = FeatureAggregateService(window_seconds=seconds)
+            config = get_config()
+            cls._instance = FeatureAggregateService(window_seconds=config.feature_buffer_seconds)
         return cls._instance
 
     # ------------- API -------------

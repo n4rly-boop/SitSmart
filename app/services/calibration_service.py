@@ -59,5 +59,3 @@ class CalibrationService:
             return self._ranges.snapshot()
         except Exception:
             return {}
-
-

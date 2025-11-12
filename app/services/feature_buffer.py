@@ -1,10 +1,8 @@
-
-
-import os
 import time
 from collections import deque
 from typing import Deque, Dict, Optional, Tuple
 
+from app.config import get_config
 
 class FeatureBuffer:
     """Sliding time window buffer for posture features.
@@ -14,7 +12,10 @@ class FeatureBuffer:
     """
 
     def __init__(self, window_seconds: Optional[int] = None):
-        self.window_seconds = int(os.getenv("FEATURE_BUFFER_SECONDS", "5")) if window_seconds is None else int(window_seconds)
+        if window_seconds is None:
+            config = get_config()
+            window_seconds = config.feature_buffer_seconds
+        self.window_seconds = int(window_seconds)
         self._buf: Deque[Tuple[int, Dict[str, float]]] = deque()
 
     def add(self, features: Optional[Dict[str, float]]) -> None:

@@ -6,7 +6,7 @@ from app.api.schemas import FeatureExtractionResponse, Notification, Notificatio
 from app.services.history_service import HistoryService
 from app.services.pose_service import PoseService, PoseServiceUnavailable
 from app.services.notification_service import NotificationService
-from app.services.rl_service import ThresholdLinUCBAgent
+from app.services.rl_service import AdaptiveThresholdAgent
 from app.services.feature_aggregate_service import FeatureAggregateService
 from app.services.calibration_service import CalibrationService
 from app.services.ml_service import MLService
@@ -241,60 +241,63 @@ async def calibration_stop():
     return {"ok": True, "calibrating": False}
 
 
-@router.get("/rl/threshold", tags=["rl"])
-async def rl_threshold():
+@router.get("/rl/status", tags=["rl"])
+async def rl_status():
+    """Consolidated RL status endpoint returning threshold, band bounds, and history."""
+    # Get threshold
     try:
-        thr = ThresholdLinUCBAgent.get_instance().get_last_decision_threshold()
+        thr = AdaptiveThresholdAgent.get_instance().get_last_decision_threshold()
     except Exception:
         try:
             thr = float(NotificationService.get_instance().options.ml_bad_prob_threshold)
         except Exception:
             thr = 0.6
-    return {"threshold": float(thr)}
-
-
-@router.get("/rl/delta_baseline", tags=["rl"])
-async def rl_delta_baseline():
+    
+    # Get band bounds
     try:
-        delta_baseline = ThresholdLinUCBAgent.get_instance().get_delta_baseline()
-        if delta_baseline is None:
-            return {"delta_baseline": None}
-        return {"delta_baseline": float(delta_baseline)}
+        L, H = AdaptiveThresholdAgent.get_instance().get_band_bounds()
+        band_low = float(L)
+        band_high = float(H)
     except Exception:
-        return {"delta_baseline": None}
-
-
-@router.get("/rl/history", tags=["rl"])
-async def rl_history():
-    hist = HistoryService.get_instance().get_notification_history()
-    # Take last 5 entries, most recent first
-    last5 = list(hist[-5:])[::-1]
-    data = []
-    for r in last5:
-        try:
-            data.append({
-                "bad_posture_prob": float(r.bad_posture_prob),
-                "delta": None if r.delta is None else float(r.delta),
-                "threshold": float(r.threshold),
-                "timestamp_ms": int(r.timestamp_ms),
-            })
-        except Exception:
-            continue
-    return {"history": data}
+        band_low = None
+        band_high = None
+    
+    # Get history
+    try:
+        hist = HistoryService.get_instance().get_notification_history()
+        # Take last 5 entries, most recent first
+        last5 = list(hist[-5:])[::-1]
+        data = []
+        for r in last5:
+            try:
+                data.append({
+                    "bad_posture_prob": float(r.bad_posture_prob),
+                    "delta": None if r.delta is None else float(r.delta),
+                    "threshold": float(r.threshold),
+                    "timestamp_ms": int(r.timestamp_ms),
+                })
+            except Exception:
+                continue
+    except Exception:
+        data = []
+    
+    return {
+        "threshold": float(thr),
+        "band_low": band_low,
+        "band_high": band_high,
+        "history": data,
+    }
 
 
 @router.post("/rl/threshold/decide", tags=["rl"])
 async def rl_threshold_decide(payload: dict):
+    """Estimate next threshold (requires delta to be meaningful)."""
     try:
-        bad_prob = float(payload.get("bad_posture_prob", 0.0))
-    except Exception:
-        bad_prob = 0.0
-    agent = ThresholdLinUCBAgent.get_instance()
-    try:
-        threshold = agent.estimate_threshold(bad_prob)
-    except Exception:
+        agent = AdaptiveThresholdAgent.get_instance()
         threshold = agent.get_current_threshold()
-    return {"threshold": float(threshold)}
+        return {"threshold": float(threshold)}
+    except Exception:
+        return {"threshold": 0.6}
 
 
 @router.get("/features/aggregate/mean", tags=["aggregation"])
@@ -307,3 +310,24 @@ async def features_aggregate_mean():
 async def features_aggregate_clear():
     _agg.clear()
     return {"ok": True}
+
+
+@router.post("/reset", tags=["system"])
+async def reset_all():
+    """Fully reset agent state, history, and calibration."""
+    try:
+        # Reset RL agent
+        AdaptiveThresholdAgent.get_instance().reset()
+    except Exception:
+        pass
+    try:
+        # Clear history
+        HistoryService.get_instance().clear_history()
+    except Exception:
+        pass
+    try:
+        # Clear feature aggregation buffer
+        _agg.clear()
+    except Exception:
+        pass
+    return {"ok": True, "message": "All services reset"}

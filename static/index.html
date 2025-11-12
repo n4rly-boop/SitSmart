@@ -61,8 +61,8 @@
             <input id="calibrationEnabled" type="checkbox"> Calibration
           </label>
           <label style="font-weight:normal;font-size:12px;">Cooldown s <input id="cooldownSec" type="number" min="0" max="3600" value="6" style="width:60px"></label>
-          <label style="font-weight:normal;font-size:12px;">ML threshold <input id="mlThreshold" type="number" min="0" max="1" step="0.01" value="0.60" style="width:70px"></label>
           <button id="saveConfigBtn">Save</button>
+          <button id="resetBtn" style="background:#fee2e2;border-color:#fca5a5;color:#991b1b;">Reset Agent</button>
         </div>
         <div id="features" style="font-family:ui-monospace, SFMono-Regular, Menlo, monospace; font-size: 13px; white-space: pre-wrap; background:#f9fafb; border:1px dashed #e5e7eb; padding:8px; border-radius:6px; min-height:80px;">
           
@@ -82,7 +82,7 @@
           <div>Current threshold: <span id="rlThreshold">—</span></div>
         </div>
         <div style="display:flex;justify-content:space-between;align-items:center;gap:8px;flex-wrap:wrap;margin-top:8px;">
-          <div>Current mean delta: <span id="rlDeltaBaseline">—</span></div>
+          <div>Delta band: L=<span id="rlBandLow">—</span> H=<span id="rlBandHigh">—</span></div>
         </div>
         <div style="margin-top:10px;">
           <div style="font-weight:600;margin-bottom:6px;">Last 5 notifications</div>
@@ -112,8 +112,8 @@
       const lastNotifiedEl = document.getElementById('lastNotified');
       const notifyEnabledInput = document.getElementById('notifyEnabled');
       const cooldownSecInput = document.getElementById('cooldownSec');
-      const mlThresholdInput = document.getElementById('mlThreshold');
       const saveConfigBtn = document.getElementById('saveConfigBtn');
+      const resetBtn = document.getElementById('resetBtn');
       const calibrationEnabledInput = document.getElementById('calibrationEnabled');
 
       let landmarker = null;
@@ -262,16 +262,13 @@
           const cd = Number(data.cooldown_seconds ?? 5);
           const th = Number(data.ml_bad_prob_threshold ?? 0.6);
           cooldownSecInput.value = String(cd);
-          mlThresholdInput.value = th.toFixed(2);
         } catch {}
       }
 
       async function saveNotificationConfig(){
         const payload = {};
         const cd = Math.max(0, Math.min(3600, parseInt(cooldownSecInput.value || '0', 10)));
-        const th = Math.max(0, Math.min(1, parseFloat(mlThresholdInput.value || '0.6')));
         if (!Number.isNaN(cd)) payload.cooldown_seconds = cd;
-        if (!Number.isNaN(th)) payload.ml_bad_prob_threshold = th;
         try {
           await fetch('/api/notifications/config', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(payload) });
         } catch {}
@@ -363,6 +360,40 @@
         }
       });
       saveConfigBtn.addEventListener('click', saveNotificationConfig);
+      resetBtn.addEventListener('click', async () => {
+        if (!confirm('Reset agent state and history? This cannot be undone.')) {
+          return;
+        }
+        try {
+          const resp = await fetch('/api/reset', { method: 'POST' });
+          const data = await resp.json();
+          if (resp.ok) {
+            // Refresh UI panels to reflect reset state
+            refreshRlPanel();
+            refreshFeatureRanges();
+            lastNotificationTs = 0;
+            updateLastNotified();
+            lastMlScore = 0;
+            featuresEl.textContent = '';
+            // Show success toast
+            showToast({
+              title: 'Reset Complete',
+              message: 'Agent state and history have been reset.',
+              severity: 'info',
+              ttl_seconds: 5
+            });
+          } else {
+            throw new Error(data.detail || 'Reset failed');
+          }
+        } catch (e) {
+          showToast({
+            title: 'Reset Failed',
+            message: String(e),
+            severity: 'critical',
+            ttl_seconds: 8
+          });
+        }
+      });
       // initialize defaults
       notifyEnabled = !!notifyEnabledInput.checked;
       // Ask server if calibration is active and sync UI
@@ -383,26 +414,24 @@
       setInterval(updateLastNotified, 1000);
 
       async function refreshRlPanel(){
-        // Threshold
         try {
-          const r = await fetch('/api/rl/threshold');
+          const r = await fetch('/api/rl/status');
           const j = await r.json();
+          
+          // Threshold
           const thr = Number(j && j.threshold);
-          const el = document.getElementById('rlThreshold');
-          el.textContent = Number.isFinite(thr) ? thr.toFixed(2) : '—';
-        } catch {}
-        // Delta baseline
-        try {
-          const r = await fetch('/api/rl/delta_baseline');
-          const j = await r.json();
-          const deltaBaseline = j && j.delta_baseline !== null ? Number(j.delta_baseline) : null;
-          const el = document.getElementById('rlDeltaBaseline');
-          el.textContent = (deltaBaseline !== null && Number.isFinite(deltaBaseline)) ? deltaBaseline.toFixed(3) : '—';
-        } catch {}
-        // History
-        try {
-          const r = await fetch('/api/rl/history');
-          const j = await r.json();
+          const rlThresholdEl = document.getElementById('rlThreshold');
+          rlThresholdEl.textContent = Number.isFinite(thr) ? thr.toFixed(2) : '—';
+          
+          // Band bounds
+          const L = (j && typeof j.band_low === 'number' && Number.isFinite(j.band_low)) ? Number(j.band_low) : null;
+          const H = (j && typeof j.band_high === 'number' && Number.isFinite(j.band_high)) ? Number(j.band_high) : null;
+          const rlBandLowEl = document.getElementById('rlBandLow');
+          const rlBandHighEl = document.getElementById('rlBandHigh');
+          rlBandLowEl.textContent = (L !== null) ? L.toFixed(3) : '—';
+          rlBandHighEl.textContent = (H !== null) ? H.toFixed(3) : '—';
+          
+          // History
           const list = (j && Array.isArray(j.history)) ? j.history : [];
           const html = list.map((e) => {
             const ts = e && e.timestamp_ms ? new Date(e.timestamp_ms).toLocaleTimeString() : '';
@@ -411,8 +440,8 @@
             const th = (e && typeof e.threshold === 'number' && isFinite(e.threshold)) ? e.threshold.toFixed(2) : '—';
             return `<div>t=${ts}  prob=${bp}  delta=${dt}  thr=${th}</div>`;
           }).join('');
-          const el = document.getElementById('rlHistory');
-          el.innerHTML = html || '<div>no history</div>';
+          const rlHistoryEl = document.getElementById('rlHistory');
+          rlHistoryEl.innerHTML = html || '<div>no history</div>';
         } catch {}
       }
 
