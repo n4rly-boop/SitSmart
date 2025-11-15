@@ -1,159 +1,90 @@
 # SitSmart
 
-Real-time posture detection and feedback using MediaPipe Pose, served by FastAPI.
+Real-time posture auditing pipeline built with FastAPI, MediaPipe Pose, a classical ML classifier, and an adaptive notification policy.
 
-## Pipeline summary
-- Extract Mediapipe-based posture features over a short time window (server buffer averages them).
-- Use ML to estimate `bad_pose_prob` from the averaged features.
-- Compare `bad_pose_prob` to a threshold to decide whether to send a notification.
-- The threshold is adapted online by the RL agent in `app/services/rl_service.py` to reduce spam while keeping useful alerts.
+## What’s inside
+- `app/` – FastAPI app, domain services (pose extraction, ML, RL, notification, calibration, history).
+- `app/models/` – serialized logistic-regression classifier and scaler loaded by `MLService`.
+- `app/ml_training/` – Jupyter-style script plus figures/metrics for training the classifier on extracted features.
+- `dataset/` – feature CSV and raw frames gathered from the webcam/WebSocket demo.
+- `scripts/` – data-collection helpers (e.g., `extract_features.sh` to populate `dataset/features.csv` from the API).
+- `static/index.html` – Web demo that streams webcam frames via WebSocket for quick manual testing.
 
-## Features
-- Minimal static demo page to stream webcam frames over WebSocket (server version) and a client-side WASM demo
-- Pose features extracted from MediaPipe Pose landmarks
+## System overview
+1. Client captures webcam frames and either runs MediaPipe locally (demo page) or uploads frames to `POST /api/features`.
+2. `PoseService` computes geometric features (shoulder angles, head tilt, offsets) from MediaPipe landmarks.
+3. `FeatureAggregateService` buffers features for `FEATURE_BUFFER_SECONDS` to build a denoised mean vector.
+4. `MLService` (LogReg + StandardScaler) outputs `bad_posture_prob` given the aggregated features.
+5. `AdaptiveThresholdAgent` (RL) compares the score to a dynamic threshold and throttles notifications.
+6. `NotificationService` enforces cooldowns, posts payloads to `NOTIFICATION_WEBHOOK_URL`, and broadcasts via `/ws/notifications`.
+7. `HistoryService` stores each decision, waits `RL_DELTA_RANGE_SECONDS`, re-samples posture, and reports deltas back to the RL agent for learning.
 
-## Architecture (current)
-- Images → `POST /api/features` → returns single-frame `FeatureVector` (pure extraction)
-- Optional server buffer:
-  - `POST /api/features/aggregate/add` to append a sample
-  - `GET /api/features/aggregate/mean` to read current time‑window mean
-  - `POST /api/features/aggregate/clear` to reset
-- Decision (ML + Adaptive Threshold):
-  - `POST /api/decide/from_buffer` → averages current buffer, runs ML to get `bad_posture_prob`, compares against current threshold from RL agent, may notify via webhook → broadcast on `WS /api/ws/notifications`
-- RL status: `GET /api/rl/status`
+## Architecture highlights
+- **API layer:** `app/api/routes.py` exposes REST + WebSocket endpoints for feature extraction, aggregation, ML scoring, RL status, calibration, and notifications.
+- **Pose extraction:** `PoseService` wraps MediaPipe Pose in static-image mode, returning normalized landmarks and engineered features (`PoseFeatures` dataclass).
+- **Feature buffering:** `FeatureBuffer` keeps `(timestamp, features)` entries in a sliding window and returns means/last samples to smooth jitter before inference.
+- **Decision core:** `MLService` loads `model.pkl` / `scaler.pkl` and always processes features in the fixed `FEATURE_ORDER`. Probabilities feed the RL policy.
+- **Adaptive thresholding:** `AdaptiveThresholdAgent` is a singleton using Robbins–Monro quantile tracking to maintain low/high delta bands and choose deterministic actions (raise/lower/hold threshold).
+- **History & calibration:** `HistoryService` holds all notifications with feature snapshots, computes deltas with calibration-aware normalization, and feeds RL. `CalibrationService` optionally records per-user feature ranges and resets aggregation/history when calibration stops.
+- **Notification delivery:** `NotificationService` wraps cooldown logic, builds user-facing payloads, and reports every sent notification back to `HistoryService`.
 
-## Quickstart
-### Build and run
+## Machine learning pipeline
+- **Feature space:** five interpretable signals – shoulder line angle, head tilt, perpendicular head-to-shoulder distance in px, the distance normalized by shoulder width, and shoulder width.
+- **Dataset creation:** `scripts/extract_features.sh` iterates over labeled folders in `parsing/total_images/{good,bad}`, calls `/api/features`, and assembles `dataset/features.csv`. This keeps the schema identical to runtime extraction.
+- **Training script:** `app/ml_training/training_of_classifier_model.py` cleans the CSV, enforces absolute angles, splits the data (stratified), scales with `StandardScaler`, and searches a logistic regression grid (C, solver, class weights) with 12-fold CV optimizing macro recall.
+- **Artifacts:** the best estimator and scaler are serialized into `app/models/model.pkl` and `scaler.pkl` and later loaded by the API. The script also writes evaluation figures and `metrics_summary.csv` for traceability.
+
+## Adaptive thresholding (RL) in practice
+- Each notification stores `(bad_prob, threshold, timestamp, mean features at t₀)`. After `RL_DELTA_RANGE_SECONDS`, the system samples fresh features, normalizes per-dimension differences using calibration ranges, and collapses them into a single delta ∈ [0,1].
+- **Quantile bands:** the agent learns low/high boundaries (targets ≈30% and ≈60%) through online Robbins–Monro updates so that the bands follow the user’s personal response distribution.
+- **Policy:** 
+  - `delta < L` → threshold += `eta` (fewer alerts after weak reactions).
+  - `delta > H` → threshold -= `eta` (more alerts when posture worsens).
+  - `L ≤ delta ≤ H` → no change.
+- **Constraints:** thresholds are clamped to `[RL_TAU_MIN, RL_TAU_MAX]`, and the static `ML_BAD_PROB_THRESHOLD` is used whenever RL is unavailable. This keeps the system stable and spam-free even with noisy inputs.
+
+## Installation & running
+1. Clone the repository:
+```bash
+git clone https://github.com/n4rly-boop/SitSmart.git
 ```
+
+2. Copy .env.example to .env and fill in the values:
+```bash
+cd SitSmart && cp .env.example .env
+```
+3. Build the Docker image:
+```bash
 docker compose up --build
 ```
-Open `http://localhost:8000/static/index.html`.
 
-#### Environment variables
-- `FEATURE_BUFFER_SECONDS` (default: `12`)
-  - Time-window size (seconds) used by the server-side `FeatureBuffer` to compute mean features (also acts as minimum notification cooldown).
-- `NOTIFICATION_COOLDOWN_SECONDS` (default: `15`)
-  - Minimum interval between notifications (effective cooldown is `max(FEATURE_BUFFER_SECONDS, NOTIFICATION_COOLDOWN_SECONDS)`).
-- `NOTIFICATION_WEBHOOK_URL` (default: `http://127.0.0.1:8000/api/notifications/webhook`)
-  - Where `NotificationService` POSTs notifications. By default it hits the app’s own broadcasting endpoint.
-- `ML_BAD_PROB_THRESHOLD` (default: `0.6`)
-  - Initial/static threshold used if RL is unavailable; also seeds the RL agent’s initial threshold.
-- RL adaptive threshold parameters:
-  - `RL_THRESHOLD_STEP` (default: `0.03`) – step size for threshold adjustments.
-  - `RL_TAU_MIN` (default: `0.5`) / `RL_TAU_MAX` (default: `0.95`) – hard threshold bounds.
-  - `RL_BAND_Q_LOW` (default: `0.3`) / `RL_BAND_Q_HIGH` (default: `0.6`) – target delta quantiles for band boundaries L/H.
-  - `RL_BAND_Q_LR` (default: `0.03`) – learning rate for online quantile estimation.
-  - `RL_DELTA_RANGE_SECONDS` (default: `8.0`) – delay between notification and delta measurement window.
+This builds the FastAPI image (with MediaPipe system deps) and exposes the service on `localhost:8000`.
 
-### HTTP API
-- `POST /api/features` with form-data `image` (file): returns geometric posture features (pure extraction only).
-- `POST /api/features/aggregate/add` JSON `FeatureVector`: append a sample to the server buffer.
-- `GET /api/features/aggregate/mean`: get mean features over buffer window.
-- `POST /api/features/aggregate/clear`: clear buffer.
-- `POST /api/decide/from_buffer`: decide using buffer mean; runs ML to produce `bad_posture_prob`, compares to the adaptive threshold, and may notify.
-- `POST /api/ml/analyze` JSON: analyze features via ML service, response: `{ bad_posture_prob: float }`.
-- `GET /api/rl/status`: RL agent status (current threshold, band bounds, and recent history sample).
+### Key environment variables
+- `FEATURE_BUFFER_SECONDS` (default `12`): sliding window for averaging pose features; also sets the minimum notification cadence.
+- `NOTIFICATION_COOLDOWN_SECONDS` (default `15`): extra cooldown enforced by `NotificationService`.
+- `NOTIFICATION_WEBHOOK_URL` (default internal webhook): destination for outbound notifications before they are rebroadcast over WebSocket.
+- `ML_BAD_PROB_THRESHOLD` (default `0.6`): fallback threshold + RL seed.
+- `RL_THRESHOLD_STEP`, `RL_TAU_MIN`, `RL_TAU_MAX`, `RL_BAND_Q_LOW`, `RL_BAND_Q_HIGH`, `RL_BAND_Q_LR`, `RL_DELTA_RANGE_SECONDS`, `RL_BIAS`: tune the adaptive policy’s step size, bounds, and delta computation.
 
-Example curl:
-```
-curl -s -X POST \
-  -F "image=@/path/to/frame.jpg" \
-  http://localhost:8000/api/features | jq .
+## API & interfaces
+- `POST /api/features` – upload a frame (`image` form-data) to get engineered features + normalized landmarks.
+- `POST /api/features/aggregate/add` / `GET /api/features/aggregate/mean|clear` – manage the server-side feature buffer.
+- `POST /api/decide/from_buffer` – run the full ML+RL decision pipeline on the current mean features; may trigger a notification through the webhook + `/ws/notifications`.
+- `POST /api/ml/analyze` – pure ML scoring with explicit features provided in the request body.
+- `GET /api/rl/status` – inspect the live threshold, low/high delta bands, and the most recent history entries.
+- `GET /api/notifications/last`, `GET /api/notifications/config`, `POST /api/notifications/config` – interact with the notification subsystem.
+- `GET /api/features/ranges`, `/api/calibration/*` – monitor or control calibration.
+- `GET /api/health`, `POST /api/reset` – system housekeeping.
+
+Example feature extraction:
+```bash
+curl -s -X POST -F "image=@/path/to/frame.jpg" http://localhost:8000/api/features | jq
 ```
 
-## Project Structure
-```
-app/
-  main.py
-  api/
-    routes.py
-    schemas.py
-  ml_training/
-    data/
-      features.csv
-    training_of_classifier_model.py
-  models/
-    model.pkl
-    scaler.pkl
-  services/
-    pose_service.py
-    rl_service.py
-    ml_service.py
-    notification_service.py
-    feature_buffer.py
-    feature_aggregate_service.py
-    history_service.py
-    calibration_service.py
-  utils/
-    image_io.py
-static/
-  index.html
-```
-
-## RL adaptive threshold (how it works — simple version)
-
-### The problem
-- Notifications fire when `bad_prob ≥ threshold`
-- Goal: adapt the threshold to reduce spam and keep useful notifications
-- Delta (0–1) measures posture change after a notification
-
-### The solution: adaptive band boundaries
-The agent learns two boundaries (L and H) for each user:
-1. L (low boundary): ~30th percentile of deltas
-2. H (high boundary): ~60th percentile of deltas
-
-### Action rules (deterministic)
-When delta arrives:
-- If `delta < L` → raise threshold (low delta = normal pose, reduce notifications)
-- If `delta > H` → lower threshold (high delta = extreme pose, catch more)
-- If `L ≤ delta ≤ H` → hold (good range, don't change)
-
-### How L and H are learned
-Uses Robbins-Monro quantile estimation:
-
-![/meta/L_equation.png](/meta/L_equation.png)
-![/meta/H_equation.png](/meta/H_equation.png)
-
-Where the indicator is 1 if the condition holds, else 0.
-- If many deltas are below L, L increases
-- If many deltas are above H, H decreases
-- Over time, L converges to the 30th percentile and H to the 60th percentile
-
-### Complete flow
-1. Notification decision:
-   - Check `bad_prob ≥ threshold`
-   - Fire notification if true
-   - Store decision (wait for delta)
-2. Delta arrives (after ~8 seconds):
-   - Update L and H using the delta
-   - Select action: raise/lower/hold based on delta vs bounds
-   - Update threshold: `threshold = threshold + action`
-3. Repeat
-
-### Example
-After 20 notifications, L ≈ 0.12, H ≈ 0.22:
-- Delta = 0.10 (< 0.12) → raise threshold
-- Delta = 0.15 (between 0.12 and 0.22) → hold
-- Delta = 0.25 (> 0.22) → lower threshold
-
-### Why it works
-- Adapts to each user: L/H reflect their delta distribution
-- Simple: deterministic rules, no complex models
-- Efficient: O(1) memory and computation
-- Self-correcting: quantiles adapt as behavior changes
-
-In short: learn two boundaries (L, H) from user deltas, then use simple rules to adjust the threshold based on where delta falls relative to those boundaries.
-
-### How delta is computed
-Delta aggregates normalized per-feature changes between the notification time and a later snapshot:
-![/meta/delta_equation.png](/meta/delta_equation.png)
-
-where:
-- Delta is computed using calibration ranges (angle features are scaled conservatively),
-- n is the number of valid features
-- b = 0.1 is a small bias,
-- See `app/services/history_service.py` for details.
-
-## Notes
-- The client-side demo (`static/index.html`) uses MediaPipe Tasks (WASM) and runs entirely in the browser.
-- The server endpoints remain available for future needs; the demo page does not require them.
+## Utilities & data assets
+- `scripts/extract_features.sh` automates dataset refreshes by running through labeled folders and writing directly to `dataset/features.csv`.
+- `parsing/` keeps raw captured frames and augmentation scripts used for experimentation.
+- `meta/` holds figures explaining the RL math (included in `README` as contextual references if needed).
+- `train/` is a workspace for potential RL agent checkpoints (`RL_AGENT_STATE_PATH` hook).
+- `static/index.html` lets you test posture detection fully in-browser using MediaPipe Tasks; the backend services remain ready for future integrations (mobile, desktop reminders, etc.).
