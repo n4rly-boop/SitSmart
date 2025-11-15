@@ -68,6 +68,7 @@ class HistoryConfig:
 
     # Delta computation window in seconds (time to wait before computing delta)
     delta_range_seconds: float = _get_float("RL_DELTA_RANGE_SECONDS", 8.0)
+    bias: float = _get_float("RL_BIAS", 0.05)
 
 
 @dataclass
