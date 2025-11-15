@@ -149,9 +149,9 @@ class HistoryService:
                 if not rng or rng <= 0:
                     rng = 1.0
                 if key.endswith("_deg"):
-                    rng /= 2.0
+                    rng /= (2.0 * 1.5)
                 rel = abs(v1 - v0) / rng
-                deltas.append(rel)
+                deltas.append(min(rel, 1.0))
             except Exception:
                 continue
         if not deltas:
