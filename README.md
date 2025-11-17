@@ -59,6 +59,7 @@ docker compose up --build
 ```
 
 This builds the FastAPI image (with MediaPipe system deps) and exposes the service on `localhost:8000`.
+You can access frontend at `localhost:8000/static/index.html`.
 
 ### Key environment variables
 - `FEATURE_BUFFER_SECONDS` (default `12`): sliding window for averaging pose features; also sets the minimum notification cadence.
