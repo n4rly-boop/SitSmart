@@ -36,7 +36,10 @@ Real-time posture auditing pipeline built with FastAPI, MediaPipe Pose, a classi
 
 ## Adaptive thresholding (RL) in practice
 - Each notification stores `(bad_prob, threshold, timestamp, mean features at t₀)`. After `RL_DELTA_RANGE_SECONDS`, the system samples fresh features, normalizes per-dimension differences using calibration ranges, and collapses them into a single delta ∈ [0,1].
+![delta.png](meta/delta_equation.png)
 - **Quantile bands:** the agent learns low/high boundaries (targets ≈30% and ≈60%) through online Robbins–Monro updates so that the bands follow the user’s personal response distribution.
+![L_equation.png](meta/L_equation.png)
+![H_equation.png](meta/H_equation.png)
 - **Policy:** 
   - `delta < L` → threshold += `eta` (fewer alerts after weak reactions).
   - `delta > H` → threshold -= `eta` (more alerts when posture worsens).
