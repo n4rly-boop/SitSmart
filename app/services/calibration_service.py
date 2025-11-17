@@ -8,7 +8,7 @@ class CalibrationService:
 
     - While calibrating, incoming feature snapshots update the ranges.
     - On calibration start: ranges are reset and calibration is enabled.
-    - On calibration stop: history is cleared, ranges persist for the session.
+    - On calibration stop: history and feature buffer are cleared, ranges persist for the session.
     """
 
     _instance: Optional["CalibrationService"] = None
@@ -29,13 +29,9 @@ class CalibrationService:
         self._calibrating = True
 
     def stop(self) -> None:
-        # Persist ranges, stop calibration and clear history
+        # Persist ranges, stop calibration and clear history/buffer
         self._calibrating = False
-        try:
-            from app.services.history_service import HistoryService
-            HistoryService.get_instance().clear_history()
-        except Exception:
-            pass
+        self._clear_post_calibration_state()
 
     def is_calibrating(self) -> bool:
         return bool(self._calibrating)
@@ -59,3 +55,17 @@ class CalibrationService:
             return self._ranges.snapshot()
         except Exception:
             return {}
+
+    def _clear_post_calibration_state(self) -> None:
+        try:
+            from app.services.history_service import HistoryService
+
+            HistoryService.get_instance().clear_history()
+        except Exception:
+            pass
+        try:
+            from app.services.feature_aggregate_service import FeatureAggregateService
+
+            FeatureAggregateService.get_instance().clear()
+        except Exception:
+            pass

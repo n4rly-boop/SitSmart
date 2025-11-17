@@ -149,9 +149,9 @@ class HistoryService:
                 if not rng or rng <= 0:
                     rng = 1.0
                 if key.endswith("_deg"):
-                    rng /= 2.0
+                    rng /= (2.0 * 1.5)
                 rel = abs(v1 - v0) / rng
-                deltas.append(rel)
+                deltas.append(min(rel, 1.0))
             except Exception:
                 continue
         if not deltas:
@@ -161,8 +161,8 @@ class HistoryService:
 
     def _delta_to_scalar(self, delta: List[float]) -> float:
         """Convert list of delta values to a single scalar using root mean formula."""
-        bias = 0.05
-        return float(math.sqrt(max(0.0, sum(delta) / len(delta) - bias)))
+        config = get_history_config()
+        return float(math.sqrt(max(0.0, sum(delta) / len(delta) - config.bias)))
 
     # --------------- Accessors ---------------
     def get_notification_history(self) -> List[NotificationRecord]:
